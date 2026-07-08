@@ -1,0 +1,62 @@
+version: "3.8"
+
+services:
+  # ─────────────────────────────────────────────────────────────────
+  # Nginx: 前端静态文件 + API 反代
+  # ─────────────────────────────────────────────────────────────────
+  nginx:
+    build: ./nginx
+    ports:
+      - "80:80"
+    volumes:
+      - frontend_dist:/usr/share/nginx/html:ro
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────────────────────────
+  # Node.js Express 后端 (端口 3000)
+  # ─────────────────────────────────────────────────────────────────
+  backend:
+    build: ./backend
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      # 容器内连接 Python Agent
+      - AI_SERVICE_URL=http://agent:8000
+    depends_on:
+      agent:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────────────────────────
+  # Python FastAPI Agent 微服务 (端口 8000)
+  # ─────────────────────────────────────────────────────────────────
+  agent:
+    build: ./backend/agent_service
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────────────────────────
+  # 前端构建器 (临时，仅用于构建 dist)
+  # ─────────────────────────────────────────────────────────────────
+  frontend-builder:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.build
+    volumes:
+      - frontend_dist:/app/dist
+    # 这个服务构建完成后退出，不持续运行
+
+volumes:
+  frontend_dist:

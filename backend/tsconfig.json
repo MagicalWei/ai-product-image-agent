@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "esModuleInterop": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "outDir": "./dist",
+    "rootDir": ".",
+    "declaration": false
+  },
+  "include": ["db/**/*.ts", "drizzle.config.ts", "config.js", "db.d.ts"],
+  "exclude": ["node_modules", "dist"]
+}

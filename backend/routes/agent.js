@@ -1,0 +1,852 @@
+import { Router } from 'express';
+import crypto from 'crypto';
+import { authenticateSession } from '../auth/sessionMiddleware.js';
+import { asyncHandler, AppError } from '../middleware/errorHandler.js';
+import createStorageProvider from '../utils/storage.js';
+import { loadBrandMemory, saveBrandMemory } from '../agents/contextStore.js';
+
+const router = Router();
+const storage = createStorageProvider(process.env.STORAGE_TYPE || 'local');
+
+// Python AI 服务地址
+const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:8000';
+
+// 启动时检查 AI 服务可达性
+(async () => {
+  try {
+    const resp = await fetch(`${AI_SERVICE_URL}/health`, { signal: AbortSignal.timeout(5000) });
+    if (resp.ok) {
+      console.log(`[Agent] AI service reachable at ${AI_SERVICE_URL}`);
+    } else {
+      console.warn(`[Agent] AI service at ${AI_SERVICE_URL} returned status ${resp.status}`);
+    }
+  } catch (e) {
+    console.warn(`[Agent] AI service at ${AI_SERVICE_URL} is not reachable: ${e.message}`);
+    console.warn(`[Agent] Agent chat endpoints will fail until the Python service is started.`);
+  }
+})();
+// 请求超时 60 秒
+const AI_TIMEOUT_MS = 120_000;
+
+let pool;
+export function setPool(p) {
+  pool = p;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Usage Log Helper
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function writeUsageLog(uid, action, creditsDelta, creditsAfter, detail) {
+  const id = 'ulog-' + crypto.randomUUID();
+  await pool.query(
+    `INSERT INTO usage_logs (id, uid, action, credits_delta, credits_after, detail)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [id, uid, action, creditsDelta, creditsAfter, detail || '']
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 会话 CRUD（不变）
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 1. GET /api/agent/brand-memory
+router.get(
+  '/brand-memory',
+  authenticateSession,
+  asyncHandler(async (req, res) => {
+    const memory = await loadBrandMemory(pool, req.user.uid);
+    res.json({ success: true, brandMemory: memory });
+  })
+);
+
+// 2. PUT /api/agent/brand-memory
+router.put(
+  '/brand-memory',
+  authenticateSession,
+  asyncHandler(async (req, res) => {
+    const { brandMemory } = req.body;
+    if (!brandMemory) throw new AppError('缺少品牌记忆数据', 400);
+    await saveBrandMemory(pool, req.user.uid, brandMemory);
+    res.json({ success: true, message: '品牌记忆已成功同步更新！' });
+  })
+);
+
+// 3. GET /api/agent/sessions
+router.get(
+  '/sessions',
+  authenticateSession,
+  asyncHandler(async (req, res) => {
+    const result = await pool.query(
+      `SELECT s.session_id, s.title, s.current_state, s.updated_at,
+              jsonb_array_length(s.chat_history) AS message_count,
+              (SELECT COUNT(*)::int FROM assets a WHERE a.session_id = s.session_id) AS image_count
+       FROM doubao_agent_sessions s
+       WHERE s.uid = $1
+       ORDER BY s.updated_at DESC`,
+      [req.user.uid]
+    );
+    res.json({ success: true, sessions: result.rows });
+  })
+);
+
+// 4. GET /api/agent/sessions/:id
+router.get(
+  '/sessions/:id',
+  authenticateSession,
+  asyncHandler(async (req, res) => {
+    const result = await pool.query(
+      'SELECT * FROM doubao_agent_sessions WHERE session_id = $1 AND uid = $2',
+      [req.params.id, req.user.uid]
+    );
+    if (result.rowCount === 0) throw new AppError('会话未找到', 404);
+    res.json({ success: true, session: result.rows[0] });
+  })
+);
+
+// 5. POST /api/agent/sessions
+router.post(
+  '/sessions',
+  authenticateSession,
+  asyncHandler(async (req, res) => {
+    const uid = req.user.uid;
+    const sessionId = 'session-' + crypto.randomUUID();
+    const title = req.body.title || '新设计会话';
+    await pool.query(
+      'INSERT INTO doubao_agent_sessions (session_id, uid, title, current_state, chat_history, last_params) VALUES ($1, $2, $3, $4, $5, $6)',
+      [sessionId, uid, title, 'COLLECTING_INFO', JSON.stringify([]), JSON.stringify({})]
+    );
+    res.json({
+      success: true,
+      session: { session_id: sessionId, title, current_state: 'COLLECTING_INFO', chat_history: [], last_params: {} }
+    });
+  })
+);
+
+// 6. DELETE /api/agent/sessions/:id
+router.delete(
+  '/sessions/:id',
+  authenticateSession,
+  asyncHandler(async (req, res) => {
+    await pool.query('DELETE FROM doubao_agent_sessions WHERE session_id = $1 AND uid = $2', [req.params.id, req.user.uid]);
+    res.json({ success: true, message: '会话已删除' });
+  })
+);
+
+// 7. PUT /api/agent/sessions/:id
+router.put(
+  '/sessions/:id',
+  authenticateSession,
+  asyncHandler(async (req, res) => {
+    const { title, canvas_state } = req.body;
+    const uid = req.user.uid;
+    const sid = req.params.id;
+
+    // Build conditional SET clause
+    const setClauses = [];
+    const values = [];
+    let paramIdx = 1;
+
+    if (title !== undefined && title.trim() !== '') {
+      setClauses.push(`title = $${paramIdx++}`);
+      values.push(title.trim());
+    }
+    if (canvas_state !== undefined) {
+      setClauses.push(`canvas_state = $${paramIdx++}`);
+      values.push(JSON.stringify(canvas_state));
+    }
+
+    if (setClauses.length === 0) {
+      throw new AppError('缺少要更新的字段 (title 或 canvas_state)', 400);
+    }
+
+    setClauses.push('updated_at = CURRENT_TIMESTAMP');
+    values.push(sid, uid);
+
+    await pool.query(
+      `UPDATE doubao_agent_sessions SET ${setClauses.join(', ')} WHERE session_id = $${paramIdx++} AND uid = $${paramIdx}`,
+      values
+    );
+    res.json({ success: true, message: '会话已更新' });
+  })
+);
+
+// 7.5 PUT /api/agent/sessions/:id/canvas-state — 专门保存画布状态
+router.put(
+  '/sessions/:id/canvas-state',
+  authenticateSession,
+  asyncHandler(async (req, res) => {
+    const { canvas_state } = req.body;
+    if (!canvas_state) throw new AppError('缺少 canvas_state', 400);
+    await pool.query(
+      'UPDATE doubao_agent_sessions SET canvas_state = $1, updated_at = CURRENT_TIMESTAMP WHERE session_id = $2 AND uid = $3',
+      [JSON.stringify(canvas_state), req.params.id, req.user.uid]
+    );
+    res.json({ success: true, message: '画布状态已保存' });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 9. POST /api/agent/chat-stream — SSE 流式透传
+// ─────────────────────────────────────────────────────────────────────────────
+
+router.post(
+  '/chat-stream',
+  authenticateSession,
+  asyncHandler(async (req, res) => {
+    const uid = req.user.uid;
+    const {
+      message, product_image_base64, image_types: clientImageTypes,
+      session_id,
+      product_name: clientProductName,
+      selling_points: clientSellingPoints,
+      mask_data,
+      canvas_snapshot,
+      stitch_regions,
+      current_images,
+      style_preference: clientStyle,
+      aspect_ratio: clientAspectRatio,
+    } = req.body;
+
+    if (!message || message.trim() === '') {
+      throw new AppError('请输入有效的指令消息', 400);
+    }
+
+    // 用户校验
+    const userRes = await pool.query('SELECT * FROM users WHERE uid = $1', [uid]);
+    if (userRes.rowCount === 0) throw new AppError('未找到当前用户信息', 404);
+    const user = userRes.rows[0];
+
+    // 免费体验：跳过额度检查
+    let remainingCredits = 'unlimited';
+
+    // 解析 / 创建会话
+    let currentSessionId = session_id;
+    if (!currentSessionId) {
+      const recentRes = await pool.query(
+        'SELECT session_id FROM doubao_agent_sessions WHERE uid = $1 ORDER BY updated_at DESC LIMIT 1',
+        [uid]
+      );
+      currentSessionId = recentRes.rowCount > 0 ? recentRes.rows[0].session_id : 'session-' + crypto.randomUUID();
+    }
+
+    // 加载会话状态
+    let sessionRes = await pool.query(
+      'SELECT * FROM doubao_agent_sessions WHERE session_id = $1 AND uid = $2',
+      [currentSessionId, uid]
+    );
+    if (sessionRes.rowCount === 0) {
+      await pool.query(
+        'INSERT INTO doubao_agent_sessions (session_id, uid, title, current_state, chat_history, last_params) VALUES ($1, $2, $3, $4, $5, $6)',
+        [currentSessionId, uid, '新设计会话', 'COLLECTING_INFO', JSON.stringify([]), JSON.stringify({})]
+      );
+      sessionRes = await pool.query(
+        'SELECT * FROM doubao_agent_sessions WHERE session_id = $1 AND uid = $2',
+        [currentSessionId, uid]
+      );
+    }
+
+    const session = sessionRes.rows[0];
+    const previousState = session.current_state;
+    const previousHistory = session.chat_history || [];
+    const previousParams = session.last_params || {};
+    const toolResults = session.tool_results || {};
+    const agentMemory = session.agent_memory || {};
+
+    // 加载品牌记忆（异常会直接上抛给 asyncHandler）
+    const brandMemory = await loadBrandMemory(pool, uid);
+
+    // 设置 SSE 响应头
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+
+    let fullResult = null;  // stores the final result for DB persistence
+    let sseEnded = false;
+
+    // 监听客户端断连
+    req.on('close', () => {
+      sseEnded = true;
+      console.log('[Agent SSE] Client disconnected');
+    });
+
+    const sendSSE = (data) => {
+      if (!sseEnded) {
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+      }
+    };
+
+    try {
+      console.log(`[Agent SSE] Calling AI service stream. Phase: ${previousState}`);
+
+      const pythonResponse = await fetch(`${AI_SERVICE_URL}/agent/run-stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          current_phase: previousState,
+          chat_history: previousHistory,
+          message: message,
+          product_name: clientProductName || previousParams.product_name || '',
+          selling_points: clientSellingPoints || previousParams.selling_points || '',
+          ecom_platform: previousParams.ecom_platform || '',
+          aspect_ratio: clientAspectRatio || previousParams.aspect_ratio || '1:1',
+          language: previousParams.language || 'zh',
+          target_country: previousParams.target_country || '',
+          image_types: clientImageTypes || previousParams.image_types || [],
+          product_image_base64: product_image_base64 || previousParams.product_image_base64 || '',
+          style_preference: clientStyle || previousParams.style_preference || '',
+          reference_images: previousParams.reference_images || [],
+          color_palette: previousParams.color_palette || [],
+          negative_prompt: previousParams.negative_prompt || '',
+          brand_memory: brandMemory,
+          agent_memory: agentMemory,
+          skip_info_collection: req.body.skip_info_collection || false,
+          skip_design_planning: req.body.skip_design_planning || false,
+          single_image_mode: req.body.single_image_mode || false,
+          target_single_type: req.body.target_single_type || '',
+          refinement_mode: req.body.refinement_mode || false,
+          mask_data: mask_data || null,
+          canvas_snapshot: canvas_snapshot || null,
+          stitch_regions: stitch_regions || [],
+          current_images: current_images || previousParams.current_images || {},
+          tool_results: toolResults,
+        }),
+        signal: AbortSignal.timeout(AI_TIMEOUT_MS),
+      });
+
+      if (!pythonResponse.ok) {
+        const errText = await pythonResponse.text();
+        sendSSE({ event: 'error', message: `AI 处理失败: ${errText}` });
+        res.end();
+        return;
+      }
+
+      // 透传 SSE 流
+      const reader = pythonResponse.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (!sseEnded) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';  // keep incomplete line in buffer
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const payload = line.slice(6);
+            try {
+              const event = JSON.parse(payload);
+              // Track phase info for DB update
+              if (event.event === 'phase_complete') {
+                fullResult = {
+                  ...fullResult,
+                  current_phase: 'GENERATING_IMAGES',
+                  product_name: event.product_name,
+                  selling_points: event.selling_points,
+                  image_types: event.image_types,
+                  style_preference: event.style_preference || '',
+                  aspect_ratio: event.aspect_ratio || '',
+                };
+              } else if (event.event === 'info_complete') {
+                // Collect info / modify chat_history captured
+                fullResult = {
+                  ...fullResult,
+                  chat_history: event.chat_history || [],
+                  current_phase: event.phase === 'MODIFY' ? 'DONE' : 'COLLECTING_INFO',
+                };
+              } else if (event.event === 'chitchat_reply') {
+                // Chitchat — persist chat history, keep current phase
+                fullResult = {
+                  ...fullResult,
+                  chat_history: event.chat_history || [],
+                  current_phase: event.phase || session.current_state,
+                };
+              } else if (event.event === 'new_design_started') {
+                // User starts a new design — reset params, keep history
+                fullResult = {
+                  ...fullResult,
+                  current_phase: 'COLLECTING_INFO',
+                  chat_history: [],
+                  product_name: '',
+                  selling_points: '',
+                  image_types: [],
+                };
+              } else if (event.event === 'image_done') {
+                fullResult = {
+                  ...fullResult,
+                  generated_images: event.all_images || {},
+                  current_images: event.all_images || {},
+                  current_phase: 'DONE',
+                };
+              } else if (event.event === 'error') {
+                fullResult = { ...fullResult, error: event.message };
+              } else if (event.event === 'tool_call') {
+                // Store pending tool call for tracking
+                const pendingTools = session.pending_tool_calls || [];
+                pendingTools.push({ tool: event.tool, args: event.args, timestamp: new Date().toISOString() });
+                await pool.query(
+                  'UPDATE doubao_agent_sessions SET pending_tool_calls = $1, updated_at = CURRENT_TIMESTAMP WHERE session_id = $2 AND uid = $3',
+                  [JSON.stringify(pendingTools), currentSessionId, uid]
+                );
+              } else if (event.event === 'design_plan') {
+                // Layer 1: Design plan — store for reference
+                fullResult = {
+                  ...fullResult,
+                  design_plan: event.design_plan,
+                };
+              } else if (event.event === 'evaluation_progress') {
+                // Layer 2: ReAct loop evaluation progress — forward to frontend
+                // Store latest evaluation for session tracking
+                if (event.status === 'evaluated') {
+                  const evals = fullResult?.evaluations || {};
+                  const imgType = event.image_type;
+                  if (!evals[imgType]) evals[imgType] = [];
+                  evals[imgType].push({
+                    round: event.round,
+                    score: event.score,
+                    passed: event.passed,
+                    issues: event.issues || [],
+                    suggestions: event.suggestions || [],
+                  });
+                  fullResult = { ...fullResult, evaluations: evals };
+                }
+              } else if (event.event === 'memory_updated') {
+                // Phase 1: Structured agent memory updated
+                fullResult = {
+                  ...fullResult,
+                  agent_memory: event.agent_memory || {},
+                };
+              }
+            } catch {
+              // skip malformed JSON
+            }
+            // 透传给前端
+            res.write(line + '\n');
+          }
+        }
+      }
+
+      // 处理 buffer 中剩余数据
+      if (buffer.startsWith('data: ') && !sseEnded) {
+        res.write(buffer + '\n');
+      }
+
+      // 下载并持久化生成的图片
+      const generatedImages = fullResult?.generated_images || {};
+      const imageTypeEntries = Object.entries(generatedImages);
+      const localImageUrls = [];
+
+      if (imageTypeEntries.length > 0) {
+        // 免费体验：跳过额度扣减
+        await writeUsageLog(uid, 'charge', 0, user.remaining_credits || 0,
+          `SSE free generation: ${(fullResult?.image_types || []).join(', ')}, product: ${fullResult?.product_name || 'unknown'}`
+        );
+
+        // 并行下载所有图片
+        const downloadTasks = imageTypeEntries.map(async ([imgType, imgUrl]) => {
+          console.log(`[Agent SSE] Downloading [${imgType}]: ${imgUrl}`);
+          const imgFetch = await fetch(imgUrl, { signal: AbortSignal.timeout(30_000) });
+          if (!imgFetch.ok) {
+            throw new Error(`Download failed: HTTP ${imgFetch.status}`);
+          }
+          const buffer = Buffer.from(await imgFetch.arrayBuffer());
+          const fileName = `agent_${imgType}_${Date.now()}_${Math.floor(Math.random() * 1000)}.jpg`;
+          const localUrl = await storage.saveFile(buffer, fileName);
+
+          // 写入 assets 表
+          const assetId = 'asset-' + crypto.randomUUID();
+          const bytes = buffer.length;
+          const sizeStr = bytes > 1024 * 1024
+            ? `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+            : `${Math.round(bytes / 1024)} KB`;
+
+          await pool.query(
+            'INSERT INTO assets (id, uid, name, url, size, date, metrics, source, session_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+            [assetId, uid, `Agent_${imgType}_${fullResult.product_name?.substring(0, 12) || '设计'}`, localUrl, sizeStr, new Date().toISOString().split('T')[0], null, 'ai_generated', currentSessionId]
+          );
+
+          return { type: imgType, url: localUrl };
+        });
+
+        const results = await Promise.allSettled(downloadTasks);
+        for (const r of results) {
+          if (r.status === 'fulfilled') {
+            localImageUrls.push(r.value);
+          } else {
+            console.error('[Agent SSE] Image download failed:', r.reason?.message);
+          }
+        }
+
+        // 免费体验：跳过退款逻辑（未扣款无需退款）
+        if (localImageUrls.length === 0) {
+          console.log('[Agent SSE] All downloads failed, but no credits were charged.');
+        }
+      }
+
+      // 更新会话状态到 DB
+      if (fullResult) {
+        const nextPhase = fullResult.current_phase || 'COLLECTING_INFO';
+        const lastParams = {
+          ...previousParams,
+          product_name: fullResult.product_name || previousParams.product_name || '',
+          selling_points: fullResult.selling_points || previousParams.selling_points || '',
+          image_types: fullResult.image_types || previousParams.image_types || [],
+          current_images: fullResult.current_images || previousParams.current_images || {},
+          style_preference: fullResult.style_preference || previousParams.style_preference || '',
+          aspect_ratio: fullResult.aspect_ratio || previousParams.aspect_ratio || '1:1',
+        };
+
+        // 持久化 chat_history（Phase 1 完成后的完整对话上下文）
+        const chatHistory = fullResult.chat_history || previousHistory;
+        const nextChatHistory = (chatHistory && chatHistory.length > 0)
+          ? chatHistory
+          : previousHistory;
+
+        let nextTitle = session.title;
+        if ((!nextTitle || nextTitle === '新设计会话' || nextTitle === '新对话') && lastParams.product_name) {
+          nextTitle = `${lastParams.product_name} 的设计会话`;
+        }
+
+        await pool.query(
+          'UPDATE doubao_agent_sessions SET current_state = $1, chat_history = $2, last_params = $3, agent_memory = $4, title = $5, updated_at = CURRENT_TIMESTAMP WHERE session_id = $6 AND uid = $7',
+          [nextPhase, JSON.stringify(nextChatHistory), JSON.stringify(lastParams), JSON.stringify(fullResult.agent_memory || agentMemory), nextTitle, currentSessionId, uid]
+        );
+      }
+
+      // 告诉前端本地化后的图片 URL
+      const imagesMap = {};
+      for (const img of localImageUrls) {
+        imagesMap[img.type] = img.url;
+      }
+      if (Object.keys(imagesMap).length > 0) {
+        sendSSE({ event: 'images_saved', images: imagesMap, remainingCredits });
+      }
+
+      res.end();
+    } catch (err) {
+      console.error('[Agent SSE] Stream error:', err.message);
+      if (!sseEnded) {
+        sendSSE({ event: 'error', message: err.message });
+        res.end();
+      }
+    }
+  })
+);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 8.5 POST /api/agent/tool-result — Tool Use SSE 协议回传
+// ─────────────────────────────────────────────────────────────────────────────
+
+router.post(
+  '/tool-result',
+  authenticateSession,
+  asyncHandler(async (req, res) => {
+    const uid = req.user.uid;
+    const { session_id, tool_name, result } = req.body;
+
+    if (!session_id || !tool_name) {
+      throw new AppError('缺少 session_id 或 tool_name', 400);
+    }
+
+    console.log(`[Agent Tool] Received tool_result from ${uid}: ${tool_name} = ${JSON.stringify(result).substring(0, 200)}`);
+
+    // Store the tool result in the session for the Python agent to pick up
+    const sessionRes = await pool.query(
+      'SELECT * FROM doubao_agent_sessions WHERE session_id = $1 AND uid = $2',
+      [session_id, uid]
+    );
+
+    if (sessionRes.rowCount === 0) {
+      throw new AppError('会话不存在', 404);
+    }
+
+    const session = sessionRes.rows[0];
+    const pendingTools = session.pending_tool_calls || [];
+    const toolResults = session.tool_results || {};
+
+    // Record this tool result
+    toolResults[tool_name] = {
+      result,
+      timestamp: new Date().toISOString()
+    };
+
+    // Remove from pending
+    const updatedPending = pendingTools.filter(t => t.tool !== tool_name);
+
+    await pool.query(
+      'UPDATE doubao_agent_sessions SET tool_results = $1, pending_tool_calls = $2, updated_at = CURRENT_TIMESTAMP WHERE session_id = $3 AND uid = $4',
+      [JSON.stringify(toolResults), JSON.stringify(updatedPending), session_id, uid]
+    );
+
+    res.json({ success: true });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 8. POST /api/agent/chat — 核心 AI 流水线（已重构）
+// ─────────────────────────────────────────────────────────────────────────────
+
+router.post(
+  '/chat',
+  authenticateSession,
+  asyncHandler(async (req, res) => {
+    const uid = req.user.uid;
+    const { message, product_image_base64, image_types: clientImageTypes, session_id } = req.body;
+
+    if (!message || message.trim() === '') {
+      throw new AppError('请输入有效的指令消息', 400);
+    }
+
+    // A. 用户校验
+    const userRes = await pool.query('SELECT * FROM users WHERE uid = $1', [uid]);
+    if (userRes.rowCount === 0) throw new AppError('未找到当前用户信息', 404);
+    const user = userRes.rows[0];
+    let remainingCredits = 'unlimited';
+
+    // 免费体验：跳过额度检查
+
+    // B. 解析 / 创建会话
+    let currentSessionId = session_id;
+    if (!currentSessionId) {
+      const recentRes = await pool.query(
+        'SELECT session_id FROM doubao_agent_sessions WHERE uid = $1 ORDER BY updated_at DESC LIMIT 1',
+        [uid]
+      );
+      currentSessionId = recentRes.rowCount > 0 ? recentRes.rows[0].session_id : 'session-' + crypto.randomUUID();
+    }
+
+    // 重置会话
+    if (message.toLowerCase() === '/reset' || message.toLowerCase() === '/clear') {
+      await pool.query(
+        'UPDATE doubao_agent_sessions SET current_state = $1, chat_history = $2, last_params = $3, updated_at = CURRENT_TIMESTAMP WHERE session_id = $4 AND uid = $5',
+        ['COLLECTING_INFO', JSON.stringify([]), JSON.stringify({}), currentSessionId, uid]
+      );
+      return res.json({
+        success: true, intent: 'clarify', clarify_msg: '会话已重置，您可以开始新的设计任务了！',
+        brandMemory: {}, images: null, metrics: null,
+        remainingCredits, membershipType: user.membership_type,
+        phase: 'COLLECTING_INFO', session_id: currentSessionId
+      });
+    }
+
+    // 加载 / 初始化会话状态
+    let sessionRes = await pool.query(
+      'SELECT * FROM doubao_agent_sessions WHERE session_id = $1 AND uid = $2',
+      [currentSessionId, uid]
+    );
+    if (sessionRes.rowCount === 0) {
+      await pool.query(
+        'INSERT INTO doubao_agent_sessions (session_id, uid, title, current_state, chat_history, last_params) VALUES ($1, $2, $3, $4, $5, $6)',
+        [currentSessionId, uid, '新设计会话', 'COLLECTING_INFO', JSON.stringify([]), JSON.stringify({})]
+      );
+      sessionRes = await pool.query(
+        'SELECT * FROM doubao_agent_sessions WHERE session_id = $1 AND uid = $2',
+        [currentSessionId, uid]
+      );
+    }
+
+    const session = sessionRes.rows[0];
+    const previousState = session.current_state;
+    const previousHistory = session.chat_history || [];
+    const previousParams = session.last_params || {};
+
+    // C. 加载品牌记忆
+    const brandMemory = await loadBrandMemory(pool, uid);
+
+    // D. 转发到 Python AI 服务（API key 由 Python 端自己管理）
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+
+    let pythonResponse;
+    try {
+      console.log(`[Agent] Calling AI service. Phase: ${previousState}`);
+      pythonResponse = await fetch(`${AI_SERVICE_URL}/agent/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          current_phase: previousState,
+          chat_history: previousHistory,
+          message: message,
+          product_name: previousParams.product_name || '',
+          selling_points: previousParams.selling_points || '',
+          ecom_platform: previousParams.ecom_platform || '',
+          aspect_ratio: previousParams.aspect_ratio || '1:1',
+          language: previousParams.language || 'zh',
+          target_country: previousParams.target_country || '',
+          image_types: clientImageTypes || previousParams.image_types || [],
+          product_image_base64: product_image_base64 || previousParams.product_image_base64 || '',
+          style_preference: previousParams.style_preference || '',
+          reference_images: previousParams.reference_images || [],
+          color_palette: previousParams.color_palette || [],
+          negative_prompt: previousParams.negative_prompt || '',
+          brand_memory: brandMemory,
+        }),
+        signal: controller.signal,
+      });
+    } catch (netErr) {
+      clearTimeout(timeoutId);
+      if (netErr.name === 'AbortError') {
+        console.error('[Agent] AI service timeout');
+        throw new AppError('AI 服务响应超时，请稍后重试', 504);
+      }
+      console.error('[Agent] AI service unreachable:', netErr.message);
+      throw new AppError('AI 引擎未启动，请确保 Python 后台服务运行中', 503);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    if (!pythonResponse.ok) {
+      const errText = await pythonResponse.text();
+      console.error('[Agent] AI service error:', pythonResponse.status, errText);
+      throw new AppError(`AI 处理失败: ${errText}`, 502);
+    }
+
+    const result = await pythonResponse.json();
+
+    // 部分失败但不是致命错误 —— 仍有图片生成成功时放行
+    if (result.error && (!result.generated_images || Object.keys(result.generated_images).length === 0)) {
+      throw new AppError(result.error, 500);
+    }
+
+    // D. 更新会话状态
+    const nextPhase = result.current_phase || 'COLLECTING_INFO';
+    const nextHistory = result.chat_history || [];
+    const lastParams = {
+      product_name: result.product_name || previousParams.product_name || '',
+      selling_points: result.selling_points || previousParams.selling_points || '',
+      ecom_platform: result.ecom_platform || previousParams.ecom_platform || '',
+      aspect_ratio: result.aspect_ratio || previousParams.aspect_ratio || '1:1',
+      language: result.language || previousParams.language || 'zh',
+      target_country: result.target_country || previousParams.target_country || '',
+      image_types: result.image_types || previousParams.image_types || [],
+      style_preference: result.style_preference || previousParams.style_preference || '',
+      color_palette: result.color_palette || previousParams.color_palette || [],
+      product_image_base64: product_image_base64 || previousParams.product_image_base64 || '',
+      reference_images: previousParams.reference_images || [],
+      negative_prompt: result.negative_prompt || previousParams.negative_prompt || ''
+    };
+
+    let nextTitle = session.title;
+    if ((!nextTitle || nextTitle === '新设计会话' || nextTitle === '新对话') && lastParams.product_name) {
+      nextTitle = `${lastParams.product_name} 的设计会话`;
+    }
+
+    await pool.query(
+      'UPDATE doubao_agent_sessions SET current_state = $1, chat_history = $2, last_params = $3, title = $4, updated_at = CURRENT_TIMESTAMP WHERE session_id = $5 AND uid = $6',
+      [nextPhase, JSON.stringify(nextHistory), JSON.stringify(lastParams), nextTitle, currentSessionId, uid]
+    );
+
+    // E. 并行下载生成的图片
+    const generatedImages = result.generated_images || {};
+    const imageTypeEntries = Object.entries(generatedImages);
+
+    if (imageTypeEntries.length > 0) {
+      // 免费体验：跳过额度扣减
+      await writeUsageLog(uid, 'charge', 0, user.remaining_credits || 0,
+        `Free generation: ${(lastParams.image_types || []).join(', ')}, product: ${lastParams.product_name || 'unknown'}`
+      );
+
+      // 并行下载所有图片
+      const downloadTasks = imageTypeEntries.map(async ([imgType, imgUrl]) => {
+        console.log(`[Agent] Downloading [${imgType}]: ${imgUrl}`);
+        const imgFetch = await fetch(imgUrl, { signal: AbortSignal.timeout(30_000) });
+        if (!imgFetch.ok) {
+          throw new Error(`Download failed: HTTP ${imgFetch.status}`);
+        }
+        const buffer = Buffer.from(await imgFetch.arrayBuffer());
+        const fileName = `agent_${imgType}_${Date.now()}_${Math.floor(Math.random() * 1000)}.jpg`;
+        const localUrl = await storage.saveFile(buffer, fileName);
+
+        // 写入 assets 表
+        const assetId = 'asset-' + crypto.randomUUID();
+        const bytes = buffer.length;
+        const sizeStr = bytes > 1024 * 1024
+          ? `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+          : `${Math.round(bytes / 1024)} KB`;
+
+        await pool.query(
+          'INSERT INTO assets (id, uid, name, url, size, date, metrics, source, session_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+          [assetId, uid, `Agent_${imgType}_${lastParams.product_name?.substring(0, 12) || '设计'}`, localUrl, sizeStr, new Date().toISOString().split('T')[0], null, 'ai_generated', currentSessionId]
+        );
+
+        return { type: imgType, url: localUrl };
+      });
+
+      const results = await Promise.allSettled(downloadTasks);
+
+      // 收集成功和失败
+      const localImageUrls = [];
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          localImageUrls.push(r.value);
+        } else {
+          console.error('[Agent] Image download failed:', r.reason?.message);
+        }
+      }
+
+      // 免费体验：跳过退款逻辑
+      if (localImageUrls.length === 0) {
+        console.log('[Agent] All downloads failed, but no credits were charged.');
+        throw new AppError('所有图片下载失败，请稍后重试', 500);
+      }
+
+      // F. 返回结果
+      const imagesMap = {};
+      for (const img of localImageUrls) {
+        imagesMap[img.type] = img.url;
+      }
+
+      return res.json({
+        success: true,
+        intent: 'generate',
+        phase: 'GENERATING_IMAGES',
+        images: imagesMap,
+        prompts: result.prompts || {},
+        product_name: lastParams.product_name,
+        selling_points: lastParams.selling_points,
+        image_types: lastParams.image_types,
+        aspect_ratio: lastParams.aspect_ratio,
+        style_preference: lastParams.style_preference,
+        reasoning: [
+          'Phase 1: 信息收集完成',
+          `产品: ${lastParams.product_name || '未知'}`,
+          `图片类型: ${(lastParams.image_types || []).join(', ')}`,
+          'Phase 2: 批量生图完成'
+        ],
+        brandMemory: {},
+        metrics: null,
+        remainingCredits,
+        membershipType: user.membership_type,
+        session_id: currentSessionId
+      });
+    }
+
+    // 信息收集阶段 - 返回追问消息
+    const lastMsg = nextHistory[nextHistory.length - 1];
+    const replyText = lastMsg?.content || '请告诉我您的产品信息和需要的图片类型，我将为您批量生成商品图！';
+
+    res.json({
+      success: true,
+      intent: 'clarify',
+      phase: 'COLLECTING_INFO',
+      clarify_msg: replyText,
+      product_name: lastParams.product_name,
+      selling_points: lastParams.selling_points,
+      image_types: lastParams.image_types,
+      brandMemory: {},
+      images: null,
+      metrics: null,
+      remainingCredits,
+      membershipType: user.membership_type,
+      session_id: currentSessionId
+    });
+  })
+);
+
+export default router;

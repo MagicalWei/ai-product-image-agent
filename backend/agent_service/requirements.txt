@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+pydantic
+httpx
+python-dotenv
+openai>=1.0.0
+asyncpg>=0.29.0
