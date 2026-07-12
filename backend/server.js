@@ -82,8 +82,9 @@ app.use(cors({
 // General rate limiter: 200 requests per 15 minutes per IP
 const generalLimiter = createRateLimiter({
   windowMs: 15 * 60 * 1000,
-  max: 200,
+  max: 2000,
   message: { error: '请求过于频繁，请稍后再试' },
+  skip: () => process.env.NODE_ENV !== 'production',
 });
 
 // Strict rate limiter for auth endpoints: 30 requests per 15 minutes per IP

@@ -1777,12 +1777,7 @@ function AppInner() {
                       infiniteCanvasRef.current?.insertImageLayer(imgUrl, `${label}（已生成）`);
                     }
                   });
-                  // 延迟保存 canvas state（等图片加载完成）
-                  setTimeout(() => {
-                    const els = infiniteCanvasRef.current?.getElements?.() || [];
-                    const cam = infiniteCanvasRef.current?.getCamera?.() || { x: 400, y: 300, zoom: 1.0 };
-                    saveCanvasState(currentSessionId, { elements: els, camera: cam });
-                  }, 2000);
+                  // 不在这里保存 canvas state —— 等 images_saved 事件用本地 URL 替换后再保存
                 }
                 break;
 
@@ -1798,6 +1793,12 @@ function AppInner() {
                       infiniteCanvasRef.current?.replaceImageUrl?.(oldUrl, localUrl);
                     }
                   });
+                  // 替换后重新保存 canvas state（URL 已更新为本地持久化 URL）
+                  setTimeout(() => {
+                    const els = infiniteCanvasRef.current?.getElements?.() || [];
+                    const cam = infiniteCanvasRef.current?.getCamera?.() || { x: 400, y: 300, zoom: 1.0 };
+                    saveCanvasState(currentSessionId, { elements: els, camera: cam });
+                  }, 2000);
                 }
                 if (event.remainingCredits != null) {
                   setCurrentUser(prev => ({ ...prev, remainingCredits: event.remainingCredits }));

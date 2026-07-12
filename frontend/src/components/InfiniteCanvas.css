@@ -5,7 +5,6 @@
   height: 100%;
   overflow: hidden;
   background-color: var(--bg-workspace);
-  user-select: none;
 }
 
 .infinite-canvas-svg {
@@ -13,6 +12,7 @@
   height: 100%;
   display: block;
   cursor: grab;
+  user-select: none;
 }
 
 .infinite-canvas-svg:active {
@@ -1012,6 +1012,7 @@
   box-sizing: border-box;
   max-width: 100%;
   overflow: hidden;
+  user-select: text;
 }
 
 /* AI 气泡 */

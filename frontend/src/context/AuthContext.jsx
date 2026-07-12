@@ -21,7 +21,7 @@ const authClient = createAuthClient({
 const { useSession, signIn, signUp, signOut, forgetPassword, resetPassword } = authClient;
 
 export const AuthProvider = ({ children }) => {
-  const { data: session, isPending } = useSession();
+  const { data: session, isPending, refetch } = useSession();
   const [currentUser, setCurrentUser] = useState(null);
 
   // When Better Auth session changes, map to our legacy currentUser shape
@@ -37,17 +37,24 @@ export const AuthProvider = ({ children }) => {
       setCurrentUser(mappedUser);
       localStorage.setItem('design_studio_current_user', JSON.stringify(mappedUser));
     } else if (!isPending) {
-      // No session — check legacy localStorage fallback
-      const saved = localStorage.getItem('design_studio_current_user');
-      if (saved) {
-        try {
-          setCurrentUser(JSON.parse(saved));
-        } catch {
-          // ignore
+      // No valid session — clear local state.
+      // Using a flag to distinguish "no session yet" from "logged out".
+      // After signOut, localStorage is already cleared by logout().
+      // We still check localStorage as a fallback for page-load before
+      // useSession has fetched, but only if we haven't explicitly logged out.
+      const loggedOut = sessionStorage.getItem('ba_logged_out');
+      if (!loggedOut) {
+        const saved = localStorage.getItem('design_studio_current_user');
+        if (saved) {
+          try {
+            setCurrentUser(JSON.parse(saved));
+          } catch {
+            setCurrentUser(null);
+          }
+          return;
         }
-      } else {
-        setCurrentUser(null);
       }
+      setCurrentUser(null);
     }
   }, [session, isPending]);
 
@@ -56,7 +63,10 @@ export const AuthProvider = ({ children }) => {
     if (result.error) {
       throw new Error(result.error.message || '登录失败');
     }
-    // Session auto-updates via useSession hook
+    // Clear the logout flag so localStorage fallback can work on next page load
+    sessionStorage.removeItem('ba_logged_out');
+    // Explicitly refetch session to ensure cookie is processed and state is synced
+    await refetch();
     return result;
   };
 
@@ -69,19 +79,31 @@ export const AuthProvider = ({ children }) => {
     if (result.error) {
       throw new Error(result.error.message || '注册失败');
     }
+    // Clear the logout flag and refetch session
+    sessionStorage.removeItem('ba_logged_out');
+    await refetch();
     return result;
   };
 
   const logout = useCallback(async () => {
+    // Set logout flag BEFORE signOut to prevent localStorage fallback
+    // from restoring user state during the signOut→refetch cycle
+    sessionStorage.setItem('ba_logged_out', '1');
     try {
       await signOut();
     } catch (err) {
       console.warn('Better Auth signOut failed:', err);
     }
+    // Explicitly refetch to ensure useSession is synced with server state
+    try {
+      await refetch();
+    } catch {
+      // refetch may fail if network is unavailable, that's ok
+    }
     setCurrentUser(null);
     localStorage.removeItem('design_studio_current_user');
     localStorage.removeItem('auth_token');
-  }, []);
+  }, [refetch]);
 
   // Forgot password — send reset code to email
   const forgotPassword = useCallback(async (email) => {

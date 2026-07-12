@@ -3712,6 +3712,7 @@
   font-size: 0.82rem;
   line-height: 1.45;
   text-align: left;
+  user-select: text;
 }
 
 .chat-bubble-wrapper.user .chat-message-bubble {
