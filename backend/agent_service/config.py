@@ -1,21 +1,13 @@
 """
 Agent Service — Configuration & Utility Functions
 
-Image type configs, canvas tools, aspect ratio mapping, JSON cleaning,
-and canvas context building utilities.
+Image type configs, aspect ratio mapping, JSON cleaning,
+and brand context building utilities.
 """
 
 import json
 import re
 from typing import Dict, List, Any
-
-# ========================================================
-# Tool call helper
-# ========================================================
-
-async def tool_call(tool_name: str, args: dict = None):
-    """Emit a tool_call SSE event for the frontend to execute a canvas operation."""
-    return {"event": "tool_call", "tool": tool_name, "args": args or {}}
 
 # ========================================================
 # Image type definitions with prompt generation templates
@@ -107,29 +99,6 @@ IMAGE_TYPE_CONFIGS = {
 }
 
 # ========================================================
-# Canvas query tool definitions for function calling
-# ========================================================
-
-CANVAS_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_canvas_state",
-            "description": "获取当前画布上所有图片的信息（类型、URL、位置）。当你需要了解画布上已有哪些图片、它们的布局位置时调用此函数。",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_stitch_regions",
-            "description": "获取用户在画布上框选的修改区域。当你需要知道用户选中了哪个区域进行修改时调用此函数。",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-]
-
-# ========================================================
 # Aspect Ratio Mapping
 # ========================================================
 
@@ -183,100 +152,6 @@ def clean_json_string(text: str) -> str:
             if depth == 0:
                 return text[start:i+1]
     return text.strip()
-
-# ========================================================
-# History Extraction
-# ========================================================
-
-def _extract_basic_info_from_history(history: List[Dict[str, str]]) -> Dict[str, str]:
-    """Try to extract product_name and selling_points from conversation history using regex."""
-    product_name = ""
-    selling_points = ""
-
-    for msg in history:
-        content = msg.get("content", "")
-        name_match = re.search(r"(?:产品名称|产品名|产品)[：:]\s*(.+?)(?:\n|$)", content)
-        if name_match and not product_name:
-            product_name = name_match.group(1).strip()
-
-        sp_match = re.search(r"(?:卖点|核心卖点|selling points?)[：:]\s*(.+?)(?:\n|$)", content, re.IGNORECASE)
-        if sp_match and not selling_points:
-            selling_points = sp_match.group(1).strip()
-
-    if not product_name:
-        for msg in reversed(history):
-            if msg.get("role") == "user":
-                content = msg.get("content", "")
-                m = re.search(r"(?:生成|制作|设计)(.+?)(?:的|图片|商品图)", content)
-                if m:
-                    product_name = m.group(1).strip()
-                    break
-                m = re.search(r"(?:产品|商品)(?:是|叫|为|名称)(.+?)(?:[,，。.!！\n]|$)", content)
-                if m:
-                    product_name = m.group(1).strip()
-                    break
-
-    return {
-        "product_name": product_name or "product",
-        "selling_points": selling_points or "high quality"
-    }
-
-# ========================================================
-# Canvas Context Builder
-# ========================================================
-
-def _build_canvas_context(inputs: Dict[str, Any]) -> str:
-    """Build a canvas state context string for the modify route.
-
-    Injects current_images, stitch_regions, mask_data, and canvas_snapshot
-    so the LLM knows what's on the canvas and where the user wants changes.
-    """
-    parts: List[str] = []
-
-    current_images = inputs.get("current_images", {})
-    if current_images and isinstance(current_images, dict):
-        parts.append("## 当前画布状态\n")
-        parts.append("画布上已有的图片：")
-        for img_type, url in current_images.items():
-            short_url = url[:100] if isinstance(url, str) and len(url) > 100 else url
-            img_label = IMAGE_TYPE_CONFIGS.get(img_type, {}).get("name", img_type)
-            parts.append(f"  - {img_label} ({img_type}): {short_url}")
-        parts.append("")
-
-    stitch_regions = inputs.get("stitch_regions", [])
-    if stitch_regions and isinstance(stitch_regions, list) and len(stitch_regions) > 0:
-        parts.append("用户框选的修改区域：")
-        for r in stitch_regions:
-            if isinstance(r, dict):
-                label = r.get("label", r.get("name", ""))
-                color = r.get("colorName", r.get("color", ""))
-                img_id = r.get("imageId", r.get("image_id", ""))
-                parts.append(f"  - {label} ({color}框) 位于图片 {img_id}")
-        parts.append("")
-
-    mask_data = inputs.get("mask_data")
-    if mask_data:
-        parts.append("[用户已提供遮罩数据（mask），表示需要在特定区域进行修改]")
-        parts.append("")
-
-    canvas_snapshot = inputs.get("canvas_snapshot")
-    if canvas_snapshot:
-        parts.append("[已提供画布完整快照（canvas_snapshot），包含了当前画布上所有元素的视觉状态]")
-        parts.append("")
-
-    tool_results = inputs.get("tool_results", {})
-    if tool_results and isinstance(tool_results, dict):
-        parts.append("## 画布查询结果")
-        for tool_name, tr in tool_results.items():
-            if isinstance(tr, dict):
-                result = tr.get("result", tr)
-                parts.append(f"- {tool_name}: {json.dumps(result, ensure_ascii=False)[:300]}")
-        parts.append("")
-
-    if not parts:
-        return ""
-
-    return "\n".join(parts)
 
 # ========================================================
 # Brand Context Builder

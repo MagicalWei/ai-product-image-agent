@@ -1,18 +1,12 @@
 """
-Agent Service — Unified Agent Loop
+Agent Service — Unified Agent Loop (DEPRECATED)
+
+⚠️ 此文件为 unified 架构，保留用于过渡期回退。
+   新架构见 /agent/core/loop.py（sense-decide-act-review 四阶段循环）。
+   设置 AGENT_ARCHITECTURE=unified 使用此文件，默认使用新架构。
 
 One LLM call with tools replaces the entire multi-layer pipeline:
   classify_intent → collect_info → plan_design → ReAct → generate
-
-The LLM autonomously:
-  1. Understands user intent (generate / modify / chitchat / add type / regenerate)
-  2. Extracts product info from the user message
-  3. Writes professional English image generation prompts
-  4. Calls generate_image tool
-  5. Optionally evaluates and regenerates
-  6. Calls finish_task when done
-
-This is the TRUE Agent mode — the LLM decides everything.
 """
 
 import os
@@ -24,7 +18,13 @@ from typing import Dict, List, Any, Optional, AsyncGenerator
 import httpx
 
 from memory import AgentMemory
-from config import IMAGE_TYPE_CONFIGS, map_aspect_ratio_to_size, map_ratio_for_openai_image
+from config import (
+    IMAGE_TYPE_CONFIGS,
+    map_aspect_ratio_to_size,
+    map_ratio_for_openai_image,
+    clean_json_string,
+    _build_brand_context,
+)
 from prompts import AGENT_SYSTEM_PROMPT
 from tools import AGENT_TOOLS
 from chat_client import (
@@ -41,10 +41,6 @@ MAX_RETRIES_PER_IMAGE = 3
 MAX_ITERATIONS = 10
 WARNING_THRESHOLD = 8
 
-# ========================================================
-# Unified Agent — single entry point
-# ========================================================
-
 
 async def run_unified_agent(
     message: str,
@@ -56,10 +52,8 @@ async def run_unified_agent(
     product_image_base64: str = "",
     max_iterations: int = MAX_ITERATIONS,
 ) -> AsyncGenerator[Dict[str, Any], None]:
-    """The ONE agent loop. Replaces the entire pipeline.
-
-    Takes raw user message + memory, lets the LLM decide everything.
-    No more classify_intent, collect_info, plan_design, _run_generation_loop.
+    """The ONE agent loop. Takes raw user message + memory, lets the LLM decide
+    everything. No more classify_intent, collect_info, plan_design, or legacy loops.
 
     Args:
         message: Raw user message
@@ -94,14 +88,17 @@ async def run_unified_agent(
     if memory_context:
         system_prompt += f"\n\n{memory_context}"
 
-    # Add brand context if any
-    brand_context = ""
-    if memory.brand_name:
-        brand_context += f"品牌: {memory.brand_name}\n"
-    if memory.brand_style:
-        brand_context += f"品牌风格: {memory.brand_style}\n"
+    # Add brand context using full _build_brand_context (7 fields)
+    brand_dict = {
+        "brand_name": memory.brand_name,
+        "style": memory.brand_style,
+        "product_name": memory.product_name,
+        "product_category": memory.product_category,
+        "selling_points": [memory.selling_points] if memory.selling_points else [],
+    }
+    brand_context = _build_brand_context(brand_dict)
     if brand_context:
-        system_prompt += f"\n\n## 品牌信息\n{brand_context}"
+        system_prompt += brand_context
 
     # ── Build messages ──
     messages: List[Dict[str, Any]] = [
@@ -195,15 +192,11 @@ async def run_unified_agent(
 
         # No tool calls — LLM is just chatting or asking a question
         if not tool_calls:
-            # If the LLM gives a text-only response (chitchat, question, etc.),
-            # and we haven't generated any images, yield done and return.
-            # This handles chitchat, "你能做什么", etc.
             if not generated_images:
                 memory.add_chat_turn("assistant", content[:500])
                 yield {"event": "memory_updated", "agent_memory": memory.to_dict()}
                 yield {"event": "done"}
                 return
-            # Otherwise, continue the loop (LLM might be explaining something before calling tools)
             continue
 
         # Process tool calls
@@ -257,7 +250,6 @@ async def run_unified_agent(
                 if img_url:
                     generated_images[img_type] = img_url
                     all_prompts[img_type] = prompt
-                    # Update memory with extracted product info from the prompt context
                     _update_memory_from_generation(memory, img_type, prompt, img_url)
                     yield {
                         "event": "image_progress",
@@ -340,8 +332,6 @@ def _update_memory_from_generation(
     url: str,
 ) -> None:
     """Update memory with generation results."""
-    # If memory doesn't have product info yet, the LLM inferred it
-    # We don't overwrite existing info — the LLM prompt system handles extraction
     memory.record_generation(img_type, prompt, url, 0)
     if img_type not in memory.image_types:
         memory.image_types.append(img_type)
@@ -350,215 +340,7 @@ def _update_memory_from_generation(
 
 
 # ========================================================
-# Legacy agent_loop (kept for backward compat)
-# ========================================================
-
-
-async def run_agent_loop(
-    memory: AgentMemory,
-    design_plan: Optional[Dict[str, Any]],
-    cheap_model_config: Dict[str, str],
-    vision_model_config: Dict[str, str],
-    image_model_key: str,
-    rag_retriever: Any = None,
-    max_iterations: int = MAX_ITERATIONS,
-    aspect_ratio: str = "1:1",
-    neg_prompt: str = "低画质、变形肢体、模糊、水印",
-) -> AsyncGenerator[Dict[str, Any], None]:
-    """Legacy ReAct Agent loop — kept for AGENT_MODE=legacy backward compat."""
-    size_doubao = map_aspect_ratio_to_size(aspect_ratio)
-    generated_images: Dict[str, str] = {}
-    all_prompts: Dict[str, str] = {}
-    image_retry_counts: Dict[str, int] = {}
-    all_evaluations: Dict[str, List[Dict[str, Any]]] = {}
-
-    from prompts import AGENT_SYSTEM_PROMPT_LEGACY
-
-    memory_context = memory.build_llm_context()
-    system_prompt = AGENT_SYSTEM_PROMPT_LEGACY + "\n\n" + memory_context
-
-    if design_plan:
-        system_prompt += (
-            f"\n\n## 当前设计方案\n"
-            f"设计方向: {design_plan.get('design_direction', '')}\n"
-            f"视觉风格: {design_plan.get('visual_style', '')}\n"
-        )
-
-    img_type_desc = "\n".join(
-        f"- {it}: {IMAGE_TYPE_CONFIGS.get(it, {}).get('name', it)}"
-        for it in memory.image_types
-    )
-    if img_type_desc:
-        system_prompt += f"\n\n## 需要生成的图片类型\n{img_type_desc}"
-
-    messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": system_prompt},
-        {
-            "role": "user",
-            "content": (
-                f"请为产品 '{memory.product_name}' 生成电商图片。\n"
-                f"卖点: {memory.selling_points}\n"
-                f"请按以下流程工作:\n"
-                f"1. 对每张图片类型调用 generate_image\n"
-                f"2. 生成后调用 evaluate_image 检查质量\n"
-                f"3. 如需改进则重新生成（每张最多{MAX_RETRIES_PER_IMAGE}次）\n"
-                f"4. 所有图片完成后调用 finish_task"
-            ),
-        },
-    ]
-
-    iteration = 0
-
-    while iteration < max_iterations:
-        iteration += 1
-
-        if iteration >= WARNING_THRESHOLD:
-            messages.append({
-                "role": "user",
-                "content": (
-                    f"[系统提示] 已达到第{iteration}轮，请尽快完成任务。"
-                    f"如果还有未生成的图片类型，请立即生成。"
-                    f"如果图片质量可接受，请调用 finish_task 结束。"
-                ),
-            })
-
-        yield {
-            "event": "agent_thinking",
-            "iteration": iteration,
-            "max_iterations": max_iterations,
-        }
-
-        try:
-            primary_config = {
-                "protocol": "openai",
-                "api_key": cheap_model_config.get("api_key", ""),
-                "base_url": cheap_model_config.get("base_url", "https://api.deepseek.com/v1"),
-                "model": cheap_model_config.get("model", "deepseek-chat"),
-            }
-
-            resp = await execute_chat_with_fallbacks_full(
-                messages,
-                primary_config,
-                get_chat_fallback_configs(),
-                tools=AGENT_TOOLS,
-                tool_choice="auto",
-            )
-        except Exception as e:
-            logger.error(f"[Agent Loop] LLM call failed at iteration {iteration}: {e}")
-            yield {"event": "error", "message": f"Agent LLM 调用失败: {str(e)}"}
-            break
-
-        content = resp.get("content", "")
-        tool_calls = resp.get("tool_calls", [])
-
-        assistant_msg = {"role": "assistant", "content": content}
-        if tool_calls:
-            assistant_msg["tool_calls"] = tool_calls
-        messages.append(assistant_msg)
-
-        if content and content.strip():
-            yield {
-                "event": "agent_message",
-                "agent": "react_agent",
-                "text": content[:500],
-                "iteration": iteration,
-            }
-
-        if not tool_calls:
-            continue
-
-        for tc in tool_calls:
-            fn = tc.get("function", {})
-            tool_name = fn.get("name", "")
-            try:
-                tool_args = json.loads(fn.get("arguments", "{}"))
-            except json.JSONDecodeError:
-                tool_args = {}
-
-            yield {
-                "event": "agent_tool_start",
-                "tool": tool_name,
-                "args": tool_args,
-                "iteration": iteration,
-            }
-
-            tool_result = await _execute_agent_tool(
-                tool_name=tool_name,
-                tool_args=tool_args,
-                memory=memory,
-                generated_images=generated_images,
-                all_prompts=all_prompts,
-                all_evaluations=all_evaluations,
-                image_retry_counts=image_retry_counts,
-                size_doubao=size_doubao,
-                aspect_ratio=aspect_ratio,
-                neg_prompt=neg_prompt,
-                image_model_key=image_model_key,
-                cheap_model_config=cheap_model_config,
-                vision_model_config=vision_model_config,
-                rag_retriever=rag_retriever,
-                design_plan=design_plan,
-            )
-
-            tool_msg = {
-                "role": "tool",
-                "tool_call_id": tc.get("id", f"call_{iteration}_{tool_name}"),
-                "name": tool_name,
-                "content": json.dumps(tool_result, ensure_ascii=False),
-            }
-            messages.append(tool_msg)
-
-            if tool_name == "generate_image":
-                img_type = tool_args.get("image_type", "")
-                img_url = tool_result.get("url", "")
-                if img_url:
-                    generated_images[img_type] = img_url
-                    all_prompts[img_type] = tool_args.get("prompt", "")
-                    yield {
-                        "event": "image_progress",
-                        "image_type": img_type,
-                        "url": img_url,
-                        "prompt": tool_args.get("prompt", ""),
-                    }
-            elif tool_name == "evaluate_image":
-                yield {
-                    "event": "evaluation_progress",
-                    "image_type": tool_args.get("image_type", ""),
-                    "status": "evaluated",
-                    "score": tool_result.get("overall_score", 0),
-                    "passed": tool_result.get("passed", False),
-                    "issues": tool_result.get("issues", []),
-                    "suggestions": tool_result.get("suggestions", []),
-                }
-            elif tool_name == "finish_task":
-                yield {
-                    "event": "agent_message",
-                    "agent": "react_agent",
-                    "text": tool_result.get("summary", "任务完成"),
-                }
-                yield {
-                    "event": "image_done",
-                    "all_images": generated_images,
-                }
-                return
-
-        await asyncio.sleep(0.05)
-
-    if generated_images:
-        yield {
-            "event": "image_done",
-            "all_images": generated_images,
-            "warning": f"Agent reached max iterations ({max_iterations})",
-        }
-    else:
-        yield {
-            "event": "error",
-            "message": f"Agent 在 {max_iterations} 轮内未能生成任何图片",
-        }
-
-
-# ========================================================
-# Tool execution (shared between unified and legacy)
+# Tool execution
 # ========================================================
 
 
@@ -751,7 +533,6 @@ async def _tool_evaluate_image(
                 "model": vision_model_config.get("model", "gpt-4o"),
             }
             from chat_client import execute_chat_with_fallbacks
-            from config import clean_json_string
             resp = await execute_chat_with_fallbacks(
                 messages, primary_config, get_chat_fallback_configs()
             )
@@ -792,7 +573,7 @@ async def _tool_evaluate_image(
         all_evaluations[img_type] = []
     all_evaluations[img_type].append(result)
 
-    if result.get("url") or image_url:
+    if image_url:
         memory.record_generation(img_type, "", image_url, result.get("overall_score", 0))
 
     return result

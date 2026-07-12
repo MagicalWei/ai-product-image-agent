@@ -1,37 +1,13 @@
 """
 Agent Service — Tool Definitions
 
-Canvas tools and Agent tools for function calling.
-Includes tool execution functions for the ReAct agent loop.
+Agent tools for function calling in the unified agent loop.
 """
 
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 
 # ========================================================
-# Canvas Query Tools (for modify intent + ReAct loop)
-# ========================================================
-
-CANVAS_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_canvas_state",
-            "description": "获取当前画布上所有图片的信息（类型、URL、位置）。当你需要了解画布上已有哪些图片、它们的布局位置时调用此函数。",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_stitch_regions",
-            "description": "获取用户在画布上框选的修改区域。当你需要知道用户选中了哪个区域进行修改时调用此函数。",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-]
-
-# ========================================================
-# Agent Tools (for True ReAct Agent Loop — Phase 3)
+# Agent Tools (for Unified Agent Loop)
 # ========================================================
 
 AGENT_TOOLS = [
@@ -142,28 +118,3 @@ AGENT_TOOLS = [
         },
     },
 ]
-
-# ========================================================
-# Tool Execution Helpers
-# ========================================================
-
-async def execute_canvas_tool(
-    tool_name: str,
-    current_images: Dict[str, str],
-    stitch_regions: List[Dict[str, Any]],
-    canvas_snapshot: str,
-    mask_data: Any,
-) -> Dict[str, Any]:
-    """Execute a canvas query tool locally and return the result."""
-    if tool_name == "get_canvas_state":
-        return {
-            "current_images": current_images,
-            "canvas_snapshot": canvas_snapshot,
-        }
-    elif tool_name == "get_stitch_regions":
-        return {
-            "stitch_regions": stitch_regions,
-            "mask_data": mask_data,
-        }
-    else:
-        return {"error": f"Unknown canvas tool: {tool_name}"}

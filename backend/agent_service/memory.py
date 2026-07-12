@@ -280,3 +280,32 @@ class AgentMemory:
             chat_section = "\n".join(chat_lines)
 
         return f"{header}{structured}{chat_section}"
+
+    # ── CanvasState sync methods ──
+
+    def sync_to_canvas_state(self) -> dict:
+        """Export memory fields needed to construct a CanvasState."""
+        return {
+            "current_images": self.current_images,
+            "stitch_regions": self.stitch_regions,
+            "image_types": self.image_types,
+            "aspect_ratio": self.aspect_ratio,
+            "style_preference": self.style_preference,
+            "color_palette": self.color_palette,
+            "product_name": self.product_name,
+            "selling_points": self.selling_points,
+            "ecom_platform": self.ecom_platform,
+        }
+
+    def sync_from_canvas_state(self, canvas_dict: dict) -> None:
+        """Update memory fields from a CanvasState dict."""
+        if "layers" in canvas_dict:
+            # Map canvas layers back to current_images for frontend compatibility
+            new_images = {}
+            for layer in canvas_dict.get("layers", []):
+                asset_ref = layer.get("asset_ref", "")
+                layer_type = layer.get("type", "")
+                if asset_ref:
+                    new_images[layer_type] = asset_ref
+            if new_images:
+                self.current_images = new_images
