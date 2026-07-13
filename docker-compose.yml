@@ -35,11 +35,14 @@ services:
   # Python FastAPI Agent 微服务 (端口 8000)
   # ─────────────────────────────────────────────────────────────────
   agent:
-    build: ./backend/agent_service
+    build:
+      context: .
+      dockerfile: ./backend/agent_service/Dockerfile
     env_file:
       - .env
     environment:
       - PYTHONUNBUFFERED=1
+      - AGENT_ARCHITECTURE=sense-decide-act-review
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s
