@@ -37,6 +37,9 @@ _UPLOAD_KEYWORDS = [
 def classify_input(
     message: str,
     has_image: bool = False,
+    memory: Any = None,
+    last_intent: str = "",
+    current_phase: str = "",
 ) -> IntentType:
     """Classify user input into an intent category.
 
@@ -46,6 +49,9 @@ def classify_input(
     Args:
         message: The user's raw text message.
         has_image: Whether the user attached an image.
+        memory: Optional AgentMemory instance for context-aware classification.
+        last_intent: The last classified intent (from memory.last_intent).
+        current_phase: The current agent phase (from memory.current_phase).
 
     Returns:
         The classified IntentType.
@@ -74,10 +80,20 @@ def classify_input(
     if design_score >= 1:
         return IntentType.NEW_DESIGN
 
-    # Check for clarification responses (short answers to questions)
-    clarification_patterns = ["是", "否", "对", "不对", "可以", "好的", "行", "ok", "yes", "no", "能"]
-    if any(msg_lower == p or msg_lower.startswith(p) for p in clarification_patterns):
-        return IntentType.CLARIFICATION
+    # Check for clarification responses (short answers to questions).
+    # Only classify as CLARIFICATION when we're in a context where the agent
+    # is actively collecting info — otherwise treat short replies as CHITCHAT.
+    is_clarification_context = (
+        current_phase == "COLLECTING_INFO"
+        or last_intent in ("new_design", "clarification")
+    )
+    clarification_patterns = ["是", "否", "对", "不对", "可以", "好的", "行", "ok", "yes", "no"]
+    if is_clarification_context:
+        if any(
+            (msg_lower == p or (msg_lower.startswith(p) and len(msg_lower) <= 15))
+            for p in clarification_patterns
+        ):
+            return IntentType.CLARIFICATION
 
     # Default to chitchat
     return IntentType.CHITCHAT

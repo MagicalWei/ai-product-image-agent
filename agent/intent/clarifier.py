@@ -12,11 +12,37 @@ from agent.models import DesignBrief
 _REQUIRED_FIELDS = ["subject", "use_case", "style_hint"]
 
 
-def needs_clarification(brief: DesignBrief) -> bool:
+def needs_clarification(
+    brief: DesignBrief,
+    recent_chat: list | None = None,
+    current_phase: str = "",
+) -> bool:
     """Check if the design brief has enough information to proceed.
 
     Returns True if we need to ask the user more questions.
+
+    Skips clarification when:
+    - The user's recent message contains a skip signal (e.g. "随便", "直接生成").
+    - The last assistant message contains a question mark and the user is
+      replying — avoids infinite clarification loops.
     """
+    recent_chat = recent_chat or []
+
+    # ── Skip signals in the last user message ──
+    _skip_signals = ["随便", "直接生成", "不用问了", "直接做", "直接开始", "就这样"]
+    if recent_chat:
+        last_user = recent_chat[-1].get("content", "")
+        for s in _skip_signals:
+            if s in last_user:
+                return False
+
+    # ── Avoid infinite loop: assistant asked a question and user replied ──
+    if len(recent_chat) >= 2:
+        prev_assistant = recent_chat[-2].get("content", "")
+        if "?" in prev_assistant or "？" in prev_assistant:
+            return False
+
+    # ── Check required fields ──
     for field in _REQUIRED_FIELDS:
         if not getattr(brief, field, None):
             return True

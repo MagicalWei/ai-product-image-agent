@@ -464,7 +464,13 @@ class SenseDecideActReviewLoop:
 
         # Classify intent
         has_image = bool(product_image_base64)
-        intent = classify_input(message, has_image=has_image)
+        intent = classify_input(
+            message,
+            has_image=has_image,
+            memory=memory,
+            last_intent=getattr(memory, "last_intent", ""),
+            current_phase=getattr(memory, "current_phase", ""),
+        )
 
         # Build design brief from message and memory
         brief = DesignBrief(
@@ -518,7 +524,11 @@ class SenseDecideActReviewLoop:
         # Check if clarification is needed (only for NEW_DESIGN with missing info)
         clarification_needed = False
         if intent == IntentType.NEW_DESIGN:
-            clarification_needed = needs_clarification(brief)
+            clarification_needed = needs_clarification(
+                brief,
+                recent_chat=getattr(memory, "recent_chat", None),
+                current_phase=getattr(memory, "current_phase", ""),
+            )
 
         return brief, enriched_ctx, clarification_needed
 
@@ -599,6 +609,7 @@ class SenseDecideActReviewLoop:
             decision = await self._call_decide_llm(
                 system_prompt, context,
                 product_image_base64=product_image_base64,
+                memory=memory,
             )
             return decision
         except Exception as e:
@@ -712,11 +723,15 @@ class SenseDecideActReviewLoop:
         system_prompt: str,
         context: str,
         product_image_base64: str = "",
+        memory: Any = None,
     ) -> dict[str, Any]:
         """Call the LLM for the decide phase. Uses the chat client's fallback chain.
 
         When product_image_base64 is provided, it is included as a multimodal
         image input so the LLM can see the user's uploaded product photo.
+
+        When memory is provided, recent_chat[-4:] messages are inserted as
+        independent multi-turn {role, content} pairs between system and current user.
         """
         _agent_service_dir = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..", "..", "backend", "agent_service"),
@@ -743,8 +758,17 @@ class SenseDecideActReviewLoop:
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
         ]
+
+        # Insert recent chat history as independent multi-turn messages
+        if memory and hasattr(memory, "recent_chat") and memory.recent_chat:
+            for chat in memory.recent_chat[-4:]:
+                messages.append({
+                    "role": chat["role"],
+                    "content": chat["content"][:500],
+                })
+
+        messages.append({"role": "user", "content": user_content})
 
         primary_config = {
             "protocol": "openai",
