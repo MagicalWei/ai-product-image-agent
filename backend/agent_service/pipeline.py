@@ -19,7 +19,7 @@ from agent_loop import run_unified_agent
 logger = logging.getLogger(__name__)
 
 # Feature flag: "unified" | "sense-decide-act-review" | "multi-agent"
-AGENT_ARCHITECTURE = os.getenv("AGENT_ARCHITECTURE", "sense-decide-act-review")
+AGENT_ARCHITECTURE = os.getenv("AGENT_ARCHITECTURE", "multi-agent")
 
 
 async def run_pipeline(inputs: Dict[str, Any]) -> Dict[str, Any]:
