@@ -12,6 +12,7 @@ import DatabaseView from './components/DatabaseView';
 import SessionsPanel from './components/SessionsPanel';
 import Sidebar from './components/Sidebar';
 import LayersOutlinePanel from './components/LayersOutlinePanel';
+import ExportModal from './components/ExportModal';
 
 import { evaluateImageWithGemini, isValidApiKeyFormat } from './utils/geminiEvaluator';
 import { removeBackground } from '@imgly/background-removal';
@@ -2946,148 +2947,23 @@ function AppInner() {
       </Suspense>
 
 
-      {/* Export Settings Modal with Clarity & Size Estimation */}
+      {/* Export Settings Modal */}
       {showExportModal && (() => {
-        const getExportItemsInfo = () => {
-          if (infiniteCanvasRef.current?.getExportClustersInfo) {
-            return infiniteCanvasRef.current.getExportClustersInfo();
-          }
-          return [{ width: 1200, height: 800 }];
-        };
-
-        const exportItems = getExportItemsInfo();
-        const getEstMb = (scale) => {
-          const totalBytes = exportItems.reduce((sum, item) => {
-            const scaledW = Math.round(item.width * scale);
-            const scaledH = Math.round(item.height * scale);
-            const estBytes = scaledW * scaledH * (exportFormat === 'png' ? 0.35 : 0.08);
-            return sum + estBytes;
-          }, 0);
-          return (totalBytes / (1024 * 1024)).toFixed(2);
-        };
-
-        const currentEstMb = getEstMb(exportScale);
-
+        const exportItems = infiniteCanvasRef.current?.getExportClustersInfo
+          ? infiniteCanvasRef.current.getExportClustersInfo()
+          : [{ width: 1200, height: 800 }];
         return (
-          <div className="settings-modal-overlay" onClick={() => setShowExportModal(false)} style={{ zIndex: 1050 }}>
-            <div className="settings-modal-card" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '420px', padding: '20px' }}>
-              <div className="settings-modal-header" style={{ borderBottom: '1px solid var(--outline-variant)', paddingBottom: '12px' }}>
-                <h2 style={{ fontSize: '1.0rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px', margin: 0, color: 'var(--on-surface)' }}>
-                  <Download size={18} style={{ color: 'var(--primary)' }} />
-                  <span>导出图片设置</span>
-                </h2>
-                <button 
-                  className="settings-close-btn" 
-                  style={{ padding: '4px', height: 'auto', width: 'auto', border: 'none', background: 'none', fontSize: '1.5rem', cursor: 'pointer', color: 'var(--text-secondary)' }} 
-                  onClick={() => setShowExportModal(false)}
-                >
-                  &times;
-                </button>
-              </div>
-              
-              <div className="settings-modal-body" style={{ padding: '16px 0 8px' }}>
-                {/* Format Selection */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                  <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)' }}>导出格式</label>
-                  <div style={{ display: 'flex', gap: '8px' }}>
-                    {['png', 'jpeg'].map(f => (
-                      <button
-                        key={f}
-                        onClick={() => setExportFormat(f)}
-                        style={{
-                          flex: 1,
-                          padding: '8px',
-                          borderRadius: '6px',
-                          border: '1px solid ' + (exportFormat === f ? 'var(--primary)' : 'var(--outline-variant)'),
-                          background: exportFormat === f ? 'rgba(255, 107, 53, 0.08)' : 'transparent',
-                          color: exportFormat === f ? 'var(--primary)' : 'var(--on-surface)',
-                          fontWeight: 600,
-                          cursor: 'pointer',
-                          textTransform: 'uppercase',
-                          fontSize: '0.75rem',
-                          transition: 'all 0.2s'
-                        }}
-                      >
-                        {f}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Clarity / Resolution Selection */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                  <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)' }}>选择导出清晰度 (分辨率)</label>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                    {[
-                      { scale: 1, label: '标准标清 (1x)', desc: '适合网页/快速发送' },
-                      { scale: 2, label: '高清 HD (2x)', desc: '推荐，适合大部分社交平台与展示' },
-                      { scale: 3, label: '超清 Ultra HD (3x)', desc: '印刷级清晰度，适合海报' },
-                      { scale: 4, label: '极清 Super HD (4x)', desc: '精细广告印刷画质' },
-                    ].map(item => {
-                      return (
-                        <button
-                          key={item.scale}
-                          onClick={() => setExportScale(item.scale)}
-                          style={{
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            alignItems: 'center',
-                            padding: '10px 12px',
-                            borderRadius: '8px',
-                            border: '1px solid ' + (exportScale === item.scale ? 'var(--primary)' : 'var(--outline-variant)'),
-                            background: exportScale === item.scale ? 'rgba(255, 107, 53, 0.05)' : 'transparent',
-                            color: 'var(--on-surface)',
-                            cursor: 'pointer',
-                            textAlign: 'left',
-                            transition: 'all 0.15s ease'
-                          }}
-                        >
-                          <div style={{ display: 'flex', flexDirection: 'column' }}>
-                            <span style={{ fontSize: '0.75rem', fontWeight: 600, color: exportScale === item.scale ? 'var(--primary)' : 'var(--on-surface)' }}>
-                              {item.label}
-                            </span>
-                            <span style={{ fontSize: '0.6rem', color: 'var(--text-secondary)' }}>
-                              {item.desc}
-                            </span>
-                          </div>
-                          <span style={{ fontSize: '0.75rem', fontWeight: 600, color: exportScale === item.scale ? 'var(--primary)' : 'var(--text-secondary)' }}>
-                            约 {getEstMb(item.scale)} MB
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* Summary Info Tip */}
-                <div style={{ fontSize: '0.65rem', color: 'var(--text-secondary)', padding: '8px 10px', background: 'var(--surface-container-low)', borderRadius: '6px', lineHeight: 1.4, opacity: 0.9 }}>
-                  💡 监测到画布上存在 <strong>{exportItems.length}</strong> 个独立的导出分组（叠放重叠的图层已自动合并）。<br />
-                  点击确认导出将分别下载这些文件，预计文件总大小约 <strong>{currentEstMb} MB</strong>。
-                </div>
-              </div>
-
-              <div className="settings-modal-footer" style={{ borderTop: '1px solid var(--outline-variant)', paddingTop: '12px', marginTop: '12px', display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
-                <button className="settings-btn cancel" style={{ border: '1px solid var(--outline-variant)', background: 'transparent', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', color: 'var(--on-surface)' }} onClick={() => setShowExportModal(false)}>取消</button>
-                <button 
-                  className="settings-btn confirm" 
-                  onClick={handleConfirmExport}
-                  disabled={isExporting}
-                  style={{
-                    background: 'var(--primary)',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '4px',
-                    padding: '6px 16px',
-                    fontSize: '0.8rem',
-                    fontWeight: 600,
-                    cursor: 'pointer'
-                  }}
-                >
-                  {isExporting ? '导出中...' : '开始导出'}
-                </button>
-              </div>
-            </div>
-          </div>
+          <ExportModal
+            isOpen={showExportModal}
+            onClose={() => setShowExportModal(false)}
+            onConfirm={handleConfirmExport}
+            exportFormat={exportFormat}
+            onFormatChange={setExportFormat}
+            exportScale={exportScale}
+            onScaleChange={setExportScale}
+            exportItems={exportItems}
+            isExporting={isExporting}
+          />
         );
       })()}
 
