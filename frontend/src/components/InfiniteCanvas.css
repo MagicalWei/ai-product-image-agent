@@ -908,6 +908,72 @@
   flex-shrink: 0;
 }
 
+/* ===== 对话框附件预览条 ===== */
+.chat-attachments-bar {
+  display: flex;
+  gap: 6px;
+  padding: 4px 0;
+  flex-wrap: wrap;
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--surface-variant);
+  border: 1px solid var(--outline-variant);
+  border-radius: 8px;
+  padding: 3px 6px;
+  max-width: 140px;
+  overflow: hidden;
+}
+
+.attachment-chip img {
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.attachment-chip-name {
+  font-size: 0.6rem;
+  color: var(--on-surface-variant);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 60px;
+}
+
+.attachment-chip-remove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(186, 26, 26, 0.15);
+  border: none;
+  color: var(--error);
+  border-radius: 50%;
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  flex-shrink: 0;
+  padding: 0;
+  transition: all 0.15s ease;
+}
+
+.attachment-chip-remove:hover {
+  background: rgba(186, 26, 26, 0.35);
+}
+
+[data-theme='dark'] .chat-attachments-bar {
+  /* dark theme adjustments if needed */
+}
+
+[data-theme='dark'] .attachment-chip {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
 .chat-quick-actions {
   display: flex;
   gap: 4px;

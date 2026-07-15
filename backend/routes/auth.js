@@ -112,4 +112,37 @@ if (process.env.NODE_ENV === 'test') {
   );
 }
 
+// ─── POST /verify-code ────────────────────────────────────────────────────────
+// Custom endpoint to verify 6-digit code stored in email_verification_codes table.
+// Used for both email verification on signup and password reset.
+router.post(
+  '/verify-code',
+  asyncHandler(async (req, res) => {
+    const { email, code } = req.body;
+    if (!email || !code) {
+      throw new AppError('缺少邮箱或验证码', 400);
+    }
+
+    const result = await pool.query(
+      `UPDATE email_verification_codes
+       SET used = true
+       WHERE email = $1 AND code = $2 AND used = false AND expires_at > NOW()
+       RETURNING id, email`,
+      [email.toLowerCase(), code]
+    );
+
+    if (result.rowCount === 0) {
+      throw new AppError('验证码无效或已过期', 400);
+    }
+
+    // Mark user email as verified
+    await pool.query(
+      `UPDATE "users" SET "emailVerified" = true WHERE LOWER("email") = $1`,
+      [email.toLowerCase()]
+    );
+
+    res.json({ success: true, type: 'verify' });
+  })
+);
+
 export default router;

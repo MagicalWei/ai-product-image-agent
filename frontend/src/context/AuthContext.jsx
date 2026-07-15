@@ -13,12 +13,13 @@ export const useAuth = () => {
   return context;
 };
 
-// Create Better Auth client — must use full URL (not relative path)
 const authClient = createAuthClient({
   baseURL: import.meta.env.VITE_BETTER_AUTH_URL || 'http://localhost:3000/api/auth',
 });
 
-const { useSession, signIn, signUp, signOut, forgetPassword, resetPassword } = authClient;
+const { useSession, signIn, signUp, signOut } = authClient;
+
+const AUTH_BASE = import.meta.env.VITE_BETTER_AUTH_URL || 'http://localhost:3000/api/auth';
 
 export const AuthProvider = ({ children }) => {
   const { data: session, isPending, refetch } = useSession();
@@ -70,14 +71,22 @@ export const AuthProvider = ({ children }) => {
     return result;
   };
 
-  const register = async (email, password, name) => {
-    const result = await signUp.email({
-      email,
-      password,
-      name: name || email.split('@')[0],
+  const register = async (email, password, name, code) => {
+    // Step 1: Verify the 6-digit code via our custom endpoint
+    const verifyRes = await fetch(`${AUTH_BASE}/../custom-auth/verify-code`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, code }),
     });
+    const verifyData = await verifyRes.json();
+    if (!verifyRes.ok || !verifyData.success) {
+      throw new Error(verifyData.message || '验证码无效或已过期');
+    }
+
+    // Step 2: Auto-login after successful verification
+    const result = await signIn.email({ email, password });
     if (result.error) {
-      throw new Error(result.error.message || '注册失败');
+      throw new Error(result.error.message || '登录失败');
     }
     // Clear the logout flag and refetch session
     sessionStorage.removeItem('ba_logged_out');
@@ -107,25 +116,42 @@ export const AuthProvider = ({ children }) => {
 
   // Forgot password — send reset code to email
   const forgotPassword = useCallback(async (email) => {
-    const result = await forgetPassword.email({ email });
-    if (result.error) {
-      throw new Error(result.error.message || '发送验证码失败');
+    const result = await fetch(`${AUTH_BASE}/request-password-reset`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+    });
+    const data = await result.json();
+    if (!result.ok || data.error) {
+      throw new Error(data.message || data.error?.message || '发送验证码失败');
     }
-    return result;
+    return data;
   }, []);
 
   // Reset password with code
   const resetPasswordHandler = useCallback(async (email, code, newPassword) => {
-    // Better Auth uses forgetPassword + resetPassword flow
-    const result = await resetPassword.email({
-      email,
-      token: code,
-      newPassword,
+    // Step 1: Verify the 6-digit code via our custom endpoint
+    const verifyRes = await fetch(`${AUTH_BASE}/../custom-auth/verify-code`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, code }),
     });
-    if (result.error) {
-      throw new Error(result.error.message || '密码重置失败');
+    const verifyData = await verifyRes.json();
+    if (!verifyRes.ok || !verifyData.success) {
+      throw new Error(verifyData.message || '验证码无效或已过期');
     }
-    return result;
+
+    // Step 2: Reset password via Better Auth using the verified code as token
+    const result = await fetch(`${AUTH_BASE}/reset-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, token: code, newPassword }),
+    });
+    const data = await result.json();
+    if (!result.ok || data.error) {
+      throw new Error(data.message || data.error?.message || '密码重置失败');
+    }
+    return data;
   }, []);
 
   // Send verification code for registration
@@ -137,6 +163,17 @@ export const AuthProvider = ({ children }) => {
     });
     if (result.error) {
       throw new Error(result.error.message || '发送验证码失败');
+    }
+    // Manually trigger verification email send after sign-up
+    // (Better Auth's signUp background task may not execute in non-standard runtimes)
+    try {
+      await fetch(`${AUTH_BASE}/send-verification-email`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+    } catch (e) {
+      console.warn('sendVerificationEmail fetch failed:', e.message);
     }
     return result;
   }, []);

@@ -283,6 +283,9 @@ function AppInner() {
   const [productTransform, setProductTransform] = useState(null);
   const [undoStack, setUndoStack] = useState([]);
 
+  // 画布图片 → 对话框附件
+  const [attachedImages, setAttachedImages] = useState([]);
+
   const [syncFidelity, setSyncFidelity] = useState(true);
 
   // Multi-model API keys (local storage backed)
@@ -1555,6 +1558,17 @@ function AppInner() {
     }
   };
 
+  const handleAttachImageToChat = (imageEl) => {
+    setAttachedImages(prev => {
+      if (prev.find(img => img.id === imageEl.id)) return prev;
+      return [...prev, { id: imageEl.id, url: imageEl.url, name: imageEl.name || '图片' }];
+    });
+  };
+
+  const handleRemoveAttachedImage = (id) => {
+    setAttachedImages(prev => prev.filter(img => img.id !== id));
+  };
+
   const handleSendMessage = async (text, customMaskData = null, options = {}) => {
     if (!(await checkAndDeductCredit())) {
       return;
@@ -1626,17 +1640,43 @@ function AppInner() {
         }
       });
 
+      // 将附件图片 URL 转为 base64
+      let attachedImageBase64List = [];
+      if (attachedImages.length > 0) {
+        attachedImageBase64List = await Promise.all(
+          attachedImages.map(async (img) => {
+            try {
+              const resp = await fetch(img.url);
+              const blob = await resp.blob();
+              return new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onloadend = () => resolve(reader.result);
+                reader.readAsDataURL(blob);
+              });
+            } catch (e) {
+              console.warn('附件图片 URL→base64 转换失败:', img.url, e);
+              return null;
+            }
+          })
+        );
+        attachedImageBase64List = attachedImageBase64List.filter(Boolean);
+      }
+
+      // 取第一张附件作为 product_image_base64（保持向后兼容）
+      const attachedBase64 = attachedImageBase64List.length > 0 ? attachedImageBase64List[0] : null;
+
       const bodyObj = {
           message: enhancedText,
           product_name: productInfo.name || '',
           selling_points: productInfo.sellingPoints || '',
-          product_image_base64: options.product_image_base64 || productImage || null,
+          product_image_base64: options.product_image_base64 || attachedBase64 || productImage || null,
           image_types: options.image_types || [],
           session_id: currentSessionId,
           mask_data: inpaintMaskData || null,
           canvas_snapshot: infiniteCanvasRef.current?.getCanvasSnapshot?.() || null,
           stitch_regions: stitchRegions,
           current_images: canvasImageMap,
+          reference_images: attachedImageBase64List,
           style_preference: productInfo.styleId || '',
           aspect_ratio: aspect,
           skip_info_collection: options.skip_info_collection || false,
@@ -1654,6 +1694,11 @@ function AppInner() {
         credentials: 'include',
         body: JSON.stringify(bodyObj)
       });
+
+      // 清空附件列表
+      if (attachedImages.length > 0) {
+        setAttachedImages([]);
+      }
 
       if (!sseResponse.ok) {
         const errText = await sseResponse.text();
@@ -2862,6 +2907,9 @@ function AppInner() {
                   currentSessionId={currentSessionId}
                   saveCanvasState={saveCanvasState}
                   initialCanvasState={currentCanvasState}
+                  onAttachImageToChat={handleAttachImageToChat}
+                  attachedImages={attachedImages}
+                  onRemoveAttachedImage={handleRemoveAttachedImage}
                 />
 
                 {currentVersion && showDashboard && (

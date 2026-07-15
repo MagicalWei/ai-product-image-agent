@@ -6,7 +6,7 @@
 
 这是一个类似 Lovart / 美图设计室的生图 Agent，核心架构为 **sense-decide-act-review** 循环 + **持久化画布状态（scene graph）**。这不是"prompt → image"的单步工具，而是一个带状态的多图层编排系统。
 
-技术栈：Python / FastAPI（后端）/ Gradio（前端）/ OpenAI SDK 直连（不经中间框架）。
+技术栈：Python / FastAPI（后端）/ React 19 + Vite（前端）/ OpenAI SDK 直连（不经中间框架）。
 
 ---
 
@@ -192,7 +192,7 @@ class RegionGroundingPayload(BaseModel):
   /intent         # 输入预处理、意图澄清、prompt 扩写
   /assets         # Asset Store 接口（当前 SQLite/JSON，预留数据库替换）
 /api              # FastAPI 路由层，只做请求转发和序列化，不含业务逻辑
-/ui               # Gradio 前端
+/ui               # React 19 + Vite 前端
 /tests
 ```
 

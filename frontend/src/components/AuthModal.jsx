@@ -87,10 +87,11 @@ export default function AuthModal({ onClose, onLoginSuccess, initialTab = 'login
 
     if (!email || !email.includes('@')) { setErrorMsg('请输入有效的邮箱地址！'); return; }
     if (!password || password.length < 6) { setErrorMsg('密码长度不能少于 6 位！'); return; }
+    if (!code || code.length < 4) { setErrorMsg('请先获取并输入验证码！'); return; }
 
     setIsLoading(true);
     try {
-      await register(email, password, name || email.split('@')[0]);
+      await register(email, password, name || email.split('@')[0], code);
       setSuccessMsg('注册成功！正在自动登录...');
       setTimeout(() => { onLoginSuccess?.(); onClose(); }, 1500);
     } catch (err) {
