@@ -1,13 +1,19 @@
 import React, { useState, useEffect, useRef, useImperativeHandle } from 'react';
-import { Move, Hand, Pencil, Square, Circle, ArrowUpRight, Type, StickyNote, Trash2, Sun, Moon, Plus, Minus, Maximize2, RotateCcw, Cpu, MessageSquare, Layers, Undo, Redo, Send, Image as ImageIcon, Eye, EyeOff, Lock, Unlock, ChevronUp, ChevronDown, ChevronsUp, ChevronsDown, Grid, Copy, ChevronDownIcon, User, Lightbulb, ShieldAlert, Zap } from 'lucide-react';
+import { Move, Hand, Pencil, Square, Circle, ArrowUpRight, Type, StickyNote, Trash2, Sun, Moon, Plus, Minus, Maximize2, RotateCcw, Cpu, MessageSquare, Layers, Undo, Redo, Send, Image as ImageIcon, Eye, EyeOff, Lock, Unlock, ChevronUp, ChevronDown, ChevronsUp, ChevronsDown, Grid, Copy, ChevronDownIcon, User, Lightbulb, ShieldAlert, Zap, X } from 'lucide-react';
 import * as Accordion from '@radix-ui/react-accordion';
 import './InfiniteCanvas.css';
 
 const AGENT_CONFIGS = {
-  coordinator: { name: '创意协调员 🤖', color: 'var(--primary)' },
-  copywriter: { name: '文案策划 ✍️', color: '#8b5cf6' },
-  designer: { name: '视觉设计师 🎨', color: '#ff6b35' },
-  evaluator: { name: '流量分析师 📊', color: '#10b981' }
+  orchestrator: { name: '编排助手', color: 'var(--primary)' },
+  coordinator: { name: '创意协调员', color: 'var(--primary)' },
+  competitor_analyst: { name: '竞品分析', color: '#f59e0b' },
+  requirement_collector: { name: '需求分析', color: '#3b82f6' },
+  copywriter: { name: '文案策划', color: '#8b5cf6' },
+  prompt_writer: { name: 'Prompt 工程师', color: '#8b5cf6' },
+  designer: { name: '视觉设计师', color: '#ff6b35' },
+  image_generator: { name: '视觉设计师', color: '#ff6b35' },
+  evaluator: { name: '流量分析师', color: '#10b981' },
+  reviewer: { name: '质量审查', color: '#10b981' }
 };
 
 // Stitch 颜色框色板（6 色轮转）
@@ -22,7 +28,7 @@ const STITCH_COLORS = [
 
 const getStitchColor = (index) => STITCH_COLORS[index % STITCH_COLORS.length];
 
-const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelity, isGenerating, setIsGenerating, onImportImageAsset, autoCutout = true, setAutoCutout, processCutout, chatMessages = [], isTyping = false, onRecommendationAction, evalModel = 'eval_standard', onSendMessage, chatInputValue, onInputValueChange, currentSessionId, saveCanvasState, initialCanvasState }, ref) => {
+const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelity, isGenerating, setIsGenerating, onImportImageAsset, autoCutout = true, setAutoCutout, processCutout, chatMessages = [], isTyping = false, onRecommendationAction, evalModel = 'eval_standard', onSendMessage, chatInputValue, onInputValueChange, currentSessionId, saveCanvasState, initialCanvasState, onAttachImageToChat, attachedImages = [], onRemoveAttachedImage }, ref) => {
   const [camera, setCamera] = useState(() => {
     try {
       const saved = localStorage.getItem('infinite_canvas_camera');
@@ -2895,6 +2901,21 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
                 <RotateCcw size={11} /> 重新生成
               </button>
             </div>
+            {attachedImages && attachedImages.length > 0 && (
+              <div className="chat-attachments-bar">
+                {attachedImages.map(img => (
+                  <div key={img.id} className="attachment-chip">
+                    <img src={getImageUrl(img.url)} alt={img.name || '附件'} />
+                    <span className="attachment-chip-name">{img.name || '图片'}</span>
+                    <button
+                      className="attachment-chip-remove"
+                      onClick={() => onRemoveAttachedImage?.(img.id)}
+                      title="移除附件"
+                    ><X size={10} /></button>
+                  </div>
+                ))}
+              </div>
+            )}
             <div className="chat-sidebar-input-inner">
             <textarea
               value={chatInputValue || ''}
@@ -3020,6 +3041,7 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
                           <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, background: 'rgba(30,30,30,0.9)', display: 'flex', justifyContent: 'space-around', padding: '3px 0', borderTop: '1px solid rgba(255,255,255,0.1)' }}>
                             <button onClick={(e) => { e.stopPropagation(); moveForward(el.id); }} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: '2px', display: 'flex', alignItems: 'center' }} title="上移一层"><ChevronUp size={11} /></button>
                             <button onClick={(e) => { e.stopPropagation(); moveBackward(el.id); }} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: '2px', display: 'flex', alignItems: 'center' }} title="下移一层"><ChevronDown size={11} /></button>
+                            <button onClick={(e) => { e.stopPropagation(); onAttachImageToChat?.(el); }} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: '2px', display: 'flex', alignItems: 'center' }} title="添加到对话框"><Plus size={11} /></button>
                           </div>
                         )}
                         <button

@@ -2,8 +2,9 @@
 Agent Service — Pipeline Orchestrator
 
 Thin wrapper around the agent loop that aggregates SSE events.
-Supports two architectures via AGENT_ARCHITECTURE env var:
+Supports three architectures via AGENT_ARCHITECTURE env var:
   - "sense-decide-act-review" (default): new four-phase loop (agent.core.loop)
+  - "multi-agent": multi-agent collaboration (agent.multi_agent)
   - "unified" (deprecated, read-only observation): single LLM tool-calling loop (agent_loop.py)
 """
 
@@ -17,7 +18,7 @@ from agent_loop import run_unified_agent
 
 logger = logging.getLogger(__name__)
 
-# Feature flag: "unified" | "sense-decide-act-review"
+# Feature flag: "unified" | "sense-decide-act-review" | "multi-agent"
 AGENT_ARCHITECTURE = os.getenv("AGENT_ARCHITECTURE", "sense-decide-act-review")
 
 
@@ -132,6 +133,17 @@ async def run_pipeline_stream(inputs: Dict[str, Any]):
             product_image_base64=inputs.get("product_image_base64", ""),
         ):
             yield event
+    elif AGENT_ARCHITECTURE == "multi-agent":
+        async for event in _run_multi_agent(
+            message=message,
+            memory=memory,
+            cheap_model_config=cheap_model_config,
+            vision_model_config=vision_model_config,
+            image_model_key=image_model_key,
+            rag_retriever=rag_retriever,
+            product_image_base64=inputs.get("product_image_base64", ""),
+        ):
+            yield event
     else:
         async for event in run_unified_agent(
             message=message,
@@ -207,3 +219,40 @@ async def _run_new_loop(
     # Persist canvas state after loop completes for next request
     if session_canvas_id:
         canvas_mgr.save_to_asset_store(session_canvas_id, asset_store)
+
+
+async def _run_multi_agent(
+    message: str,
+    memory: AgentMemory,
+    cheap_model_config: Dict[str, str],
+    vision_model_config: Dict[str, str],
+    image_model_key: str,
+    rag_retriever: Any = None,
+    product_image_base64: str = "",
+):
+    """Run the multi-agent architecture."""
+    _project_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..")
+    )
+    if _project_root not in sys.path:
+        sys.path.insert(0, _project_root)
+
+    from agent.multi_agent import MultiAgentOrchestrator
+
+    image_config = {
+        "api_key": image_model_key,
+    }
+
+    orchestrator = MultiAgentOrchestrator(
+        chat_config=cheap_model_config,
+        image_config=image_config,
+        vision_config=vision_model_config,
+        rag_retriever=rag_retriever,
+    )
+
+    async for event in orchestrator.run(
+        message=message,
+        memory=memory,
+        product_image_base64=product_image_base64,
+    ):
+        yield event
