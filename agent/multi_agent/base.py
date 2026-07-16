@@ -47,8 +47,14 @@ class BaseAgent(ABC):
 
     # ── LLM helpers ──
 
-    async def think(self, system_prompt: str, user_content: str) -> str:
-        """Call the LLM with a system prompt and user content. Returns raw text."""
+    async def think(self, system_prompt: str, user_content: str, config_override: dict[str, str] | None = None) -> str:
+        """Call the LLM with a system prompt and user content. Returns raw text.
+
+        Args:
+            system_prompt: System prompt for the LLM.
+            user_content: User content for the LLM.
+            config_override: Optional config dict to override self._chat_config for this call.
+        """
         _ensure_agent_service_in_path()
         from chat_client import execute_chat_with_fallbacks, get_chat_fallback_configs
 
@@ -57,11 +63,12 @@ class BaseAgent(ABC):
             {"role": "user", "content": user_content},
         ]
 
+        cfg = config_override or self._chat_config
         primary_config = {
             "protocol": "openai",
-            "api_key": self._chat_config.get("api_key", ""),
-            "base_url": self._chat_config.get("base_url", "https://api.deepseek.com/v1"),
-            "model": self._chat_config.get("model", "deepseek-chat"),
+            "api_key": cfg.get("api_key", ""),
+            "base_url": cfg.get("base_url", "https://api.deepseek.com/v1"),
+            "model": cfg.get("model", "deepseek-chat"),
         }
 
         return await execute_chat_with_fallbacks(
@@ -73,8 +80,16 @@ class BaseAgent(ABC):
         system_prompt: str,
         user_content: str,
         output_schema: dict[str, Any] | None = None,
+        config_override: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Call the LLM and parse the response as JSON. Returns a dict."""
+        """Call the LLM and parse the response as JSON. Returns a dict.
+
+        Args:
+            system_prompt: System prompt for the LLM.
+            user_content: User content for the LLM.
+            output_schema: Optional JSON schema to enforce in output.
+            config_override: Optional config dict to override self._chat_config for this call.
+        """
         _ensure_agent_service_in_path()
         from chat_client import execute_chat_with_fallbacks, get_chat_fallback_configs
         from config import clean_json_string
@@ -94,11 +109,12 @@ class BaseAgent(ABC):
             {"role": "user", "content": user_content},
         ]
 
+        cfg = config_override or self._chat_config
         primary_config = {
             "protocol": "openai",
-            "api_key": self._chat_config.get("api_key", ""),
-            "base_url": self._chat_config.get("base_url", "https://api.deepseek.com/v1"),
-            "model": self._chat_config.get("model", "deepseek-chat"),
+            "api_key": cfg.get("api_key", ""),
+            "base_url": cfg.get("base_url", "https://api.deepseek.com/v1"),
+            "model": cfg.get("model", "deepseek-chat"),
         }
 
         resp = await execute_chat_with_fallbacks(

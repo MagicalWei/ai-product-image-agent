@@ -36,12 +36,6 @@ WORKFLOW_STEPS: list[dict[str, Any]] = [
         "required": True,
         "description": "调用图像生成模型产出候选图",
     },
-    {
-        "agent": "reviewer",
-        "depends_on": ["image_generator"],
-        "required": True,
-        "description": "评估生成图质量，给出审查报告",
-    },
 ]
 
 

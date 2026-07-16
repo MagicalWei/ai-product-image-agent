@@ -44,6 +44,7 @@ async def generate_layer_fn(
     neg_prompt = (params.model_extra or {}).get("negative_prompt", "低画质、变形肢体、模糊、水印")
     image_model_key = (params.model_extra or {}).get("image_model_key", "")
     aspect_ratio = (params.model_extra or {}).get("aspect_ratio", "1:1")
+    reference_images = (params.model_extra or {}).get("reference_images", []) or []
 
     img_url = None
     gen_errors: list[str] = []
@@ -60,26 +61,38 @@ async def generate_layer_fn(
                 "Content-Type": "application/json",
             }
             payload = {
-                "model": os.getenv("DOUBAO_IMAGE_MODEL", "doubao-seedream-5-0-260128"),
+                "model": os.getenv("DOUBAO_IMAGE_MODEL", "doubao-seedream-5-0-lite-260128"),
                 "prompt": p.prompt,
                 "size": size_str,
                 "response_format": "url",
-                "extra_body": {"watermark": True},
+                "watermark": False,
+                "sequential_image_generation": "disabled",
             }
-            if neg_prompt:
-                payload["negative_prompt"] = neg_prompt
+            if reference_images:
+                payload["image"] = reference_images[:10]
+                logger.info(
+                    "[GenerateLayer] Seedream image editing with %s input image(s)",
+                    len(payload["image"]),
+                )
+
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..",
+                                             "backend", "agent_service"))
+            from chat_client import post_json_with_retries
 
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(90.0, connect=30.0)
             ) as client:
-                resp = await client.post(url, headers=headers, json=payload)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    images = data.get("data", [])
-                    if images:
-                        img_url = images[0].get("url")
-                else:
-                    gen_errors.append(f"HTTP {resp.status_code}: {resp.text[:200]}")
+                resp = await post_json_with_retries(
+                    client,
+                    url,
+                    headers=headers,
+                    payload=payload,
+                    provider="Seedream",
+                )
+                data = resp.json()
+                images = data.get("data", [])
+                if images:
+                    img_url = images[0].get("url")
         except Exception as e:
             gen_errors.append(f"Primary: {str(e)}")
 

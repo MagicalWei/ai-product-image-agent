@@ -56,6 +56,7 @@ class SenseDecideActReviewLoop:
         chat_config: dict[str, str],
         vision_config: dict[str, str],
         image_config: dict[str, Any] | None = None,
+        multimodal_config: dict[str, str] | None = None,
     ):
         self._actions = action_registry
         self._canvas = canvas_manager
@@ -63,6 +64,7 @@ class SenseDecideActReviewLoop:
         self._chat_config = chat_config
         self._vision_config = vision_config
         self._image_config = image_config or {}
+        self._multimodal_config = multimodal_config or vision_config
 
     # ================================================================
     # Public API
@@ -73,6 +75,9 @@ class SenseDecideActReviewLoop:
         message: str,
         memory: Any,  # AgentMemory
         product_image_base64: str = "",
+        style_reference_images: list[str] | None = None,
+        style_transfer_mode: bool = False,
+        product_set_mode: bool = False,
         canvas_id: str | None = None,
         rag_retriever: Any = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
@@ -94,9 +99,192 @@ class SenseDecideActReviewLoop:
             session_id = getattr(memory, "product_name", "") or f"mem_{id(memory)}"
             cid = f"canvas_{session_id}"
         canvas = self._canvas.get_or_create(cid)
+        style_reference_images = style_reference_images or []
 
         # Hydrate CanvasState from AgentMemory (existing layers/images)
         _hydrate_canvas_from_memory(canvas, memory, self._canvas, cid)
+
+        # A composer attachment is an explicit generation/edit command. Route
+        # it straight to the image action so the Agent never asks requirement
+        # questions or treats the image as analysis-only input.
+        from agent.image_routing import (
+            build_seedream_edit_prompt,
+            parse_direct_image_request,
+        )
+
+        direct_image_agent, region_edit, clean_message = parse_direct_image_request(message)
+        if style_transfer_mode and product_image_base64 and style_reference_images:
+            yield {"event": "agent_thinking", "phase": "style_analysis", "iteration": 0}
+            handler = get_action("style_transfer_batch")
+            result = await handler(ActionParams(
+                action="style_transfer_batch",
+                product_image=product_image_base64,
+                style_reference_images=style_reference_images,
+                product_name=getattr(memory, "product_name", ""),
+                selling_points=getattr(memory, "selling_points", ""),
+                image_model_key=self._image_config.get("api_key", ""),
+                negative_prompt=getattr(memory, "negative_prompt", ""),
+                multimodal_config=self._multimodal_config,
+            ), canvas)
+            if not result.success:
+                yield {"event": "error", "message": f"风格迁移失败: {result.error}"}
+                yield {"event": "done"}
+                return
+            images = result.data.get("images", {})
+            prompts = result.data.get("prompts", {})
+            expected_types = ["main", "selling_point", "detail"]
+            missing_types = [image_type for image_type in expected_types if image_type not in images]
+            for image_type, image_url in images.items():
+                canvas = self._canvas.create_layer(
+                    cid, layer_type="subject", asset_ref=image_url,
+                    prompt_used=prompts.get(image_type, ""), status="ready",
+                )
+                if hasattr(memory, "record_generation"):
+                    memory.record_generation(image_type, prompts.get(image_type, ""), image_url, 0)
+                yield {"event": "image_progress", "image_type": image_type, "url": image_url, "prompt": prompts.get(image_type, "")}
+            memory.image_types = ["main", "selling_point", "detail"]
+            memory.reference_images_intent = "style_transfer"
+            memory.vlm_style_analysis = result.data.get("style_analysis") or None
+            memory.add_chat_turn("assistant", "已按参考图风格生成主图、卖点图和详情图。")
+            _sync_canvas_to_memory(canvas, memory)
+            warning = f"以下图片生成失败，请重试：{', '.join(missing_types)}" if missing_types else ""
+            yield {"event": "image_done", "all_images": images, "all_prompts": prompts, "average_scores": {}, "warning": warning}
+            message_text = (
+                "已完成风格迁移套图：主图、卖点图、详情图。"
+                if not missing_types else
+                f"已生成 {len(images)}/3 张；{', '.join(missing_types)} 生成失败，可点击生成风格套图重试。"
+            )
+            yield {"event": "agent_message", "agent": "agent", "text": message_text}
+            yield {"event": "memory_updated", "agent_memory": memory.to_dict()}
+            yield {"event": "done"}
+            return
+        if product_set_mode and product_image_base64:
+            requested_types = [
+                image_type for image_type in (getattr(memory, "image_types", []) or ["main", "selling_point", "detail"])
+                if image_type in {"main", "selling_point", "detail"}
+            ]
+            yield {"event": "agent_thinking", "phase": "product_set_generation", "iteration": 0}
+            handler = get_action("generate_product_set")
+            result = await handler(ActionParams(
+                action="generate_product_set",
+                product_image=product_image_base64,
+                image_types=requested_types,
+                product_name=getattr(memory, "product_name", ""),
+                selling_points=getattr(memory, "selling_points", ""),
+                style_preference=getattr(memory, "style_preference", ""),
+                image_model_key=self._image_config.get("api_key", ""),
+                negative_prompt=getattr(memory, "negative_prompt", ""),
+            ), canvas)
+            if not result.success:
+                yield {"event": "error", "message": f"商品套图生成失败: {result.error}"}
+                yield {"event": "done"}
+                return
+            images = result.data.get("images", {})
+            prompts = result.data.get("prompts", {})
+            missing_types = [image_type for image_type in requested_types if image_type not in images]
+            for image_type, image_url in images.items():
+                canvas = self._canvas.create_layer(
+                    cid, layer_type="subject", asset_ref=image_url,
+                    prompt_used=prompts.get(image_type, ""), status="ready",
+                )
+                if hasattr(memory, "record_generation"):
+                    memory.record_generation(image_type, prompts.get(image_type, ""), image_url, 0)
+                yield {"event": "image_progress", "image_type": image_type, "url": image_url, "prompt": prompts.get(image_type, "")}
+            memory.image_types = requested_types
+            memory.add_chat_turn("assistant", f"已生成 {len(images)} 张商品图片。")
+            _sync_canvas_to_memory(canvas, memory)
+            warning = f"以下图片生成失败，请重试：{', '.join(missing_types)}" if missing_types else ""
+            yield {"event": "image_done", "all_images": images, "all_prompts": prompts, "average_scores": {}, "warning": warning}
+            yield {
+                "event": "agent_message", "agent": "agent",
+                "text": f"已完成商品图片生成（{len(images)}/{len(requested_types)} 张）。" + (f" 未完成：{', '.join(missing_types)}。" if missing_types else ""),
+            }
+            yield {"event": "memory_updated", "agent_memory": memory.to_dict()}
+            yield {"event": "done"}
+            return
+        if direct_image_agent and product_image_base64:
+            from agent.intent.safety_filter import safety_check
+
+            yield {"event": "agent_thinking", "phase": "sense", "iteration": 0}
+            safety_result = await safety_check(clean_message)
+            if not safety_result.passed:
+                yield {
+                    "event": "error",
+                    "message": f"内容安全检查未通过: {safety_result.blocked_reason}",
+                }
+                yield {"event": "done"}
+                return
+
+            prompt = build_seedream_edit_prompt(clean_message, region_edit=region_edit)
+            yield {
+                "event": "agent_thinking",
+                "phase": "image_generator",
+                "iteration": 1,
+                "agent_role": "image_generator",
+            }
+            yield {
+                "event": "agent_tool_start",
+                "tool": "generate_layer",
+                "args": {"layer_type": "subject", "prompt": prompt},
+                "iteration": 1,
+            }
+
+            handler = get_action("generate_layer")
+            direct_action_config = {
+                "layer_type": "subject",
+                "prompt": prompt,
+                "style_tags": [],
+                "image_model_key": self._image_config.get("api_key", ""),
+                "aspect_ratio": getattr(memory, "aspect_ratio", "1:1"),
+                "negative_prompt": getattr(memory, "negative_prompt", ""),
+                "size_doubao": self._image_config.get("size", "1920x1920"),
+                "reference_images": [product_image_base64],
+            }
+            action_params = ActionParams(
+                action="generate_layer",
+                **direct_action_config,
+            )
+            result = await handler(action_params, canvas)
+            if not result.success or not result.data.get("url"):
+                yield {
+                    "event": "error",
+                    "message": f"生图 Agent 执行失败: {result.error or '未返回图片'}",
+                }
+                yield {"event": "done"}
+                return
+
+            image_url = result.data["url"]
+            canvas = self._canvas.create_layer(
+                cid,
+                layer_type="subject",
+                asset_ref=image_url,
+                prompt_used=prompt,
+                status="ready",
+            )
+            if hasattr(memory, "record_generation"):
+                memory.record_generation("edit", prompt, image_url, 0)
+            memory.add_chat_turn("assistant", "已按附件图片执行局部修改。" if region_edit else "已按附件图片执行生图。")
+            _sync_canvas_to_memory(canvas, memory)
+            yield {
+                "event": "image_progress",
+                "image_type": "edit",
+                "url": image_url,
+                "prompt": prompt,
+            }
+            yield {
+                "event": "image_done",
+                "all_images": {"edit": image_url},
+                "all_prompts": {"edit": prompt},
+                "average_scores": {"overall": 0.0},
+            }
+            yield {
+                "event": "agent_message",
+                "agent": "image_generator",
+                "text": "已完成框选区域修改。" if region_edit else "已根据附件图片完成生成。",
+            }
+            yield {"event": "memory_updated", "agent_memory": memory.to_dict()}
+            yield {"event": "done"}
+            return
 
         # ============================================
         # PHASE 1: SENSE
@@ -252,13 +440,8 @@ class SenseDecideActReviewLoop:
             # ============================================
             yield {"event": "agent_thinking", "phase": "act", "iteration": iteration}
 
-            action_params = ActionParams(
-                action=action_name,
-                **{k: v for k, v in action_params_raw.items() if k != "action"},
-            )
-
             # Inject extra config into params for handlers that need it
-            action_params.model_extra = {
+            action_config = {
                 **action_params_raw,
                 "image_model_key": self._image_config.get("api_key", ""),
                 "aspect_ratio": getattr(memory, "aspect_ratio", "1:1"),
@@ -266,6 +449,10 @@ class SenseDecideActReviewLoop:
                 "size_doubao": self._image_config.get("size", "1920x1920"),
                 "rag_retriever": rag_retriever,
             }
+            action_params = ActionParams(
+                action=action_name,
+                **{k: v for k, v in action_config.items() if k != "action"},
+            )
 
             result = await handler(action_params, canvas)
 
@@ -459,8 +646,13 @@ class SenseDecideActReviewLoop:
     ) -> tuple[DesignBrief, EnrichedContext, bool]:
         """Phase 1: SENSE — classify, filter, assemble context, check clarification."""
         from agent.intent.classifier import classify_input
+        from agent.intent.brief_parser import apply_requirement_reply
         from agent.intent.clarifier import needs_clarification
         from agent.intent.context_assembler import assemble_context
+
+        # Persist compact replies such as "自然场景，卖点图" before checking
+        # missing slots, otherwise the Agent asks the same questions again.
+        apply_requirement_reply(message, memory)
 
         # Classify intent
         has_image = bool(product_image_base64)

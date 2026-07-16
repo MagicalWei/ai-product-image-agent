@@ -23,7 +23,6 @@ class AgentRole(str, Enum):
     COMPETITOR_ANALYST = "competitor_analyst"
     PROMPT_WRITER = "prompt_writer"
     IMAGE_GENERATOR = "image_generator"
-    REVIEWER = "reviewer"
 
 
 class AgentMessage(BaseModel):
@@ -47,6 +46,13 @@ class SharedContext(BaseModel):
 
     session_id: str = ""
     user_message: str = ""
+
+    # ── Reference images from user ──
+    reference_images: list[str] = Field(default_factory=list)  # 用户附带的参考图 base64 列表
+
+    # ── Style analysis from reference images (vision model) ──
+    style_analysis: dict[str, Any] = Field(default_factory=dict)
+    # e.g. {"dominant_colors": [...], "lighting": "...", "composition": "...", "mood": "...", "style_category": "..."}
 
     # ── Requirement Collector output ──
     design_brief: DesignBrief | None = None

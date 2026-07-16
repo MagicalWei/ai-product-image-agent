@@ -11,6 +11,8 @@ from agent.actions.handlers.compose import compose_fn
 from agent.actions.handlers.upscale import upscale_fn
 from agent.actions.handlers.layout_suggest import layout_suggest_fn
 from agent.actions.handlers.search_knowledge import search_knowledge_fn
+from agent.actions.handlers.style_transfer_batch import style_transfer_batch_fn
+from agent.actions.handlers.generate_product_set import generate_product_set_fn
 from agent.actions.registry import register_action
 
 
@@ -23,6 +25,8 @@ def register_all_actions() -> None:
     register_action("upscale", upscale_fn)
     register_action("layout_suggest", layout_suggest_fn)
     register_action("search_knowledge", search_knowledge_fn)
+    register_action("style_transfer_batch", style_transfer_batch_fn)
+    register_action("generate_product_set", generate_product_set_fn)
 
 
 __all__ = [
@@ -33,5 +37,7 @@ __all__ = [
     "upscale_fn",
     "layout_suggest_fn",
     "search_knowledge_fn",
+    "style_transfer_batch_fn",
+    "generate_product_set_fn",
     "register_all_actions",
 ]

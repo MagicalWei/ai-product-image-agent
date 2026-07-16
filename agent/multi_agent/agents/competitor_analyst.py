@@ -39,6 +39,10 @@ class CompetitorAnalystAgent(BaseAgent):
 
     role = AgentRole.COMPETITOR_ANALYST
 
+    def __init__(self, chat_config: dict[str, str], multimodal_config: dict[str, str] | None = None):
+        super().__init__(chat_config)
+        self._multimodal_config = multimodal_config or {}
+
     async def execute(self, ctx: SharedContext) -> AgentMessage:
         brief = ctx.design_brief
         if not brief:
@@ -64,10 +68,12 @@ class CompetitorAnalystAgent(BaseAgent):
         )
 
         try:
+            # Use multimodal config if available, otherwise fall back to chat config
             result = await self.think_structured(
                 system_prompt=COMPETITOR_ANALYST_SYSTEM_PROMPT,
                 user_content=user_content,
                 output_schema=COMPETITOR_OUTPUT_SCHEMA,
+                config_override=self._multimodal_config if self._multimodal_config.get("api_key") else None,
             )
 
             ctx.competitor_report = result

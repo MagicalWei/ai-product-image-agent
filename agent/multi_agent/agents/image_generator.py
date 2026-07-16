@@ -2,6 +2,7 @@
 Multi-Agent — Image Generator
 
 Calls image generation APIs to produce candidate images for each prompt.
+Supports both text-to-image and image-to-image (when reference images are provided).
 Does NOT call LLM — uses the existing Doubao Seedream → DALL-E fallback chain.
 """
 
@@ -10,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 
 import httpx
 
@@ -22,8 +24,8 @@ logger = logging.getLogger(__name__)
 class ImageGeneratorAgent(BaseAgent):
     """Generates images for each prompt using the image generation API chain.
 
-    This agent does NOT use the LLM (think/think_structured). It directly
-    calls image generation APIs via the existing fallback chain.
+    When ctx.reference_images contains images and the prompt indicates
+    modification intent, uses image-to-image mode via Seedream's init_image.
     """
 
     role = AgentRole.IMAGE_GENERATOR
@@ -42,10 +44,19 @@ class ImageGeneratorAgent(BaseAgent):
                 error="No prompts available",
             )
 
+        # Image-to-image should only run when the user explicitly asked to edit
+        # an existing image or to transfer/reference its style. Product uploads
+        # are often just analysis inputs and should not force init_image.
+        reference_images = self._select_generation_references(ctx)
+        if reference_images:
+            logger.info(
+                f"[ImageGenerator] Image-to-image mode: {len(reference_images)} reference(s)"
+            )
+
         logger.info(f"[ImageGenerator] Generating {len(prompts)} images...")
 
         # Generate all images in parallel
-        tasks = [self._generate_single(p) for p in prompts]
+        tasks = [self._generate_single(p, reference_images) for p in prompts]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         generated_count = 0
@@ -73,14 +84,22 @@ class ImageGeneratorAgent(BaseAgent):
             error="; ".join(errors) if errors else None,
         )
 
-    async def _generate_single(self, prompt_entry: dict) -> str | None:
-        """Generate a single image, trying primary then fallbacks."""
+    async def _generate_single(
+        self, prompt_entry: dict, reference_images: list[str] | None = None
+    ) -> str | None:
+        """Generate a single image, trying primary then fallbacks.
+
+        If ctx.reference_images are available, uses image-to-image mode
+        by passing the first reference as init_image to Seedream.
+        """
         prompt_text = prompt_entry.get("prompt", "")
         if not prompt_text:
             return None
 
         image_model_key = self._image_config.get("api_key", "")
         neg_prompt = "低画质、变形肢体、模糊、水印"
+
+        reference_images = reference_images or []
 
         # Try primary (Doubao Seedream)
         if image_model_key:
@@ -94,31 +113,79 @@ class ImageGeneratorAgent(BaseAgent):
                     "Content-Type": "application/json",
                 }
                 payload = {
-                    "model": os.getenv("DOUBAO_IMAGE_MODEL", "doubao-seedream-5-0-260128"),
+                    "model": os.getenv("DOUBAO_IMAGE_MODEL", "doubao-seedream-5-0-lite-260128"),
                     "prompt": prompt_text,
                     "size": "1920x1920",
                     "response_format": "url",
-                    "extra_body": {"watermark": True},
+                    "watermark": False,
+                    "sequential_image_generation": "disabled",
                 }
-                if neg_prompt:
-                    payload["negative_prompt"] = neg_prompt
+
+                # Seedream 5.0 Lite accepts one or more image inputs through
+                # the official `image` array. The annotated frame itself is the
+                # spatial signal for local editing.
+                if reference_images:
+                    payload["image"] = [
+                        img if img.startswith("data:") else f"data:image/png;base64,{img}"
+                        for img in reference_images[:10]
+                    ]
+                    logger.info(
+                        "[ImageGenerator] Using Seedream image inputs: %s",
+                        len(payload["image"]),
+                    )
+
+                sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..",
+                                                 "backend", "agent_service"))
+                from chat_client import post_json_with_retries
 
                 async with httpx.AsyncClient(
                     timeout=httpx.Timeout(90.0, connect=30.0)
                 ) as client:
-                    resp = await client.post(url, headers=headers, json=payload)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        images = data.get("data", [])
-                        if images:
-                            return images[0].get("url")
+                    resp = await post_json_with_retries(
+                        client,
+                        url,
+                        headers=headers,
+                        payload=payload,
+                        provider="Seedream",
+                    )
+                    data = resp.json()
+                    images = data.get("data", [])
+                    if images:
+                        return images[0].get("url")
             except Exception as e:
                 logger.warning(f"[ImageGenerator] Primary failed: {e}")
 
-        # Try fallbacks
-        return await self._try_fallbacks(prompt_text, neg_prompt)
+        # Try fallbacks (DALL-E also supports image-to-image via image_fidelity)
+        return await self._try_fallbacks(prompt_text, neg_prompt, reference_images)
 
-    async def _try_fallbacks(self, prompt: str, neg_prompt: str) -> str | None:
+    def _select_generation_references(self, ctx: SharedContext) -> list[str]:
+        """Return reference images only when they should drive generation."""
+        if not ctx.reference_images:
+            return []
+
+        if ctx.metadata.get("_force_image_agent"):
+            return ctx.reference_images
+
+        ref_intent = ctx.metadata.get("_ref_images_intent", "")
+        if ref_intent in {"style_transfer", "composition_only"}:
+            return ctx.reference_images
+        if ref_intent == "ignore":
+            return []
+
+        user_message = (ctx.user_message or "").lower()
+        modification_keywords = [
+            "修改", "改", "换成", "替换", "去掉", "删除", "加上", "添加",
+            "modify", "change", "replace", "remove", "add", "edit", "update",
+            "变成", "改为", "调整", "换一个",
+        ]
+        if any(kw in user_message for kw in modification_keywords):
+            return ctx.reference_images
+
+        return []
+
+    async def _try_fallbacks(
+        self, prompt: str, neg_prompt: str, reference_images: list[str] | None = None
+    ) -> str | None:
         """Try DALL-E then Anthropic SVG fallback chain."""
         import sys
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..",
@@ -136,6 +203,8 @@ class ImageGeneratorAgent(BaseAgent):
             try:
                 protocol = fb_config["protocol"].lower().strip()
                 if protocol == "openai":
+                    # DALL-E 3 doesn't natively support init_image, but we pass
+                    # it through the fallback function which handles it if supported
                     return await call_openai_image_api(
                         prompt,
                         map_ratio_for_openai_image("1:1"),
