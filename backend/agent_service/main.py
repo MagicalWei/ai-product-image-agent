@@ -1,15 +1,21 @@
 import os
 import json
+import sys
 import logging
+from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional, Any
-from dotenv import load_dotenv
-from pipeline import run_pipeline, run_pipeline_stream
+from dotenv import dotenv_values, load_dotenv
 
-# 从父目录 .env 加载环境变量
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
+# Load the project-level environment before importing any local modules. Some of
+# those modules read model settings at import time, so loading afterwards makes
+# startup behavior depend on the process working directory/import order.
+PROJECT_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+load_dotenv(dotenv_path=PROJECT_ENV_PATH)
+
+from pipeline import run_pipeline, run_pipeline_stream
 
 logger = logging.getLogger(__name__)
 
@@ -21,12 +27,43 @@ CHAT_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 CHAT_MODEL = os.getenv("DEEPSEEK_CHAT_MODEL", "deepseek-v4-flash")
 
 IMAGE_API_KEY = os.getenv("DOUBAO_API_KEY", "")
-IMAGE_MODEL = os.getenv("DOUBAO_IMAGE_MODEL", "doubao-seedream-5-0-260128")
+IMAGE_MODEL = os.getenv("DOUBAO_IMAGE_MODEL", "doubao-seedream-5-0-lite-260128")
 
 # Vision model for product image analysis (e.g., gpt-4o, doubao-vision)
 CHAT_VISION_API_KEY = os.getenv("CHAT_VISION_API_KEY", "")
 CHAT_VISION_BASE_URL = os.getenv("CHAT_VISION_BASE_URL", "https://api.openai.com/v1")
 CHAT_VISION_MODEL = os.getenv("CHAT_VISION_MODEL", "gpt-4o")
+
+# Multimodal model for requirement_collector and competitor_analyst (aliyun bailian qwen3.6-plus)
+MULTIMODAL_API_KEY = os.getenv("DASHSCOPE_API_KEY", os.getenv("MULTIMODAL_API_KEY", ""))
+MULTIMODAL_BASE_URL = os.getenv("MULTIMODAL_BASE_URL", "https://ws-kbw1pwxjomfj4o8k.cn-beijing.maas.aliyuncs.com/compatible-mode/v1")
+MULTIMODAL_MODEL = os.getenv("MULTIMODAL_MODEL", "qwen3.6-plus")
+
+
+def get_multimodal_config() -> dict[str, str]:
+    """Return current multimodal settings with an explicit project-file fallback.
+
+    Some launchers export an empty DASHSCOPE_API_KEY. python-dotenv deliberately
+    does not replace an existing empty variable when override=False, which made
+    the same .env work in a shell but fail from a dev-service launcher.
+    """
+    file_config = dotenv_values(PROJECT_ENV_PATH) if PROJECT_ENV_PATH.exists() else {}
+
+    def configured_value(*keys: str, default: str = "") -> str:
+        for key in keys:
+            env_value = os.getenv(key, "").strip()
+            if env_value:
+                return env_value
+            file_value = str(file_config.get(key) or "").strip()
+            if file_value:
+                return file_value
+        return default
+
+    return {
+        "api_key": configured_value("DASHSCOPE_API_KEY", "MULTIMODAL_API_KEY"),
+        "base_url": configured_value("MULTIMODAL_BASE_URL", default=MULTIMODAL_BASE_URL),
+        "model": configured_value("MULTIMODAL_MODEL", default=MULTIMODAL_MODEL),
+    }
 
 # RAG 配置
 RAG_ENABLED = os.getenv("RAG_ENABLED", "true").lower() == "true"
@@ -35,6 +72,11 @@ RAG_ENABLED = os.getenv("RAG_ENABLED", "true").lower() == "true"
 EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", "")
 EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "https://api.openai.com/v1")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+
+
+def _is_placeholder_secret(value: str) -> bool:
+    normalized = (value or "").strip().lower()
+    return not normalized or normalized.startswith(("your_", "replace_", "placeholder"))
 
 # RAG 模块全局实例（延迟初始化）
 _rag_retriever = None
@@ -50,8 +92,8 @@ async def _init_rag():
         logger.info("RAG is disabled (RAG_ENABLED=false)")
         return
 
-    if not EMBEDDING_API_KEY:
-        logger.warning("No EMBEDDING_API_KEY configured, RAG will be disabled")
+    if _is_placeholder_secret(EMBEDDING_API_KEY):
+        logger.warning("No usable EMBEDDING_API_KEY configured, RAG will be disabled")
         return
 
     try:
@@ -135,6 +177,9 @@ class RunRequest(BaseModel):
     product_image_base64: str = ""
     style_preference: str = ""
     reference_images: List[str] = []
+    style_reference_images: List[str] = []
+    style_transfer_mode: bool = False
+    product_set_mode: bool = False
     color_palette: List[str] = []
 
     # Phase 2 fields
@@ -185,6 +230,9 @@ async def run_agent_stream(req: RunRequest):
         "product_image_base64": req.product_image_base64,
         "style_preference": req.style_preference,
         "reference_images": req.reference_images,
+        "style_reference_images": req.style_reference_images,
+        "style_transfer_mode": req.style_transfer_mode,
+        "product_set_mode": req.product_set_mode,
         "color_palette": req.color_palette,
 
         "generated_images": {},
@@ -197,6 +245,9 @@ async def run_agent_stream(req: RunRequest):
         "chat_vision_model_api_key": CHAT_VISION_API_KEY,
         "chat_vision_model_base_url": CHAT_VISION_BASE_URL,
         "chat_vision_model_name": CHAT_VISION_MODEL,
+        "multimodal_api_key": get_multimodal_config()["api_key"],
+        "multimodal_base_url": get_multimodal_config()["base_url"],
+        "multimodal_model": get_multimodal_config()["model"],
         "image_model_api_key": IMAGE_API_KEY,
         "image_model_name": IMAGE_MODEL,
 
@@ -276,6 +327,9 @@ async def run_agent(req: RunRequest):
         "chat_vision_model_api_key": CHAT_VISION_API_KEY,
         "chat_vision_model_base_url": CHAT_VISION_BASE_URL,
         "chat_vision_model_name": CHAT_VISION_MODEL,
+        "multimodal_api_key": MULTIMODAL_API_KEY,
+        "multimodal_base_url": MULTIMODAL_BASE_URL,
+        "multimodal_model": MULTIMODAL_MODEL,
         "image_model_api_key": IMAGE_API_KEY,
         "image_model_name": IMAGE_MODEL,
 
@@ -327,9 +381,52 @@ async def run_agent(req: RunRequest):
         raise HTTPException(status_code=500, detail=f"Graph Execution Error: {str(e)}")
 
 
+class AnalyzeProductImageRequest(BaseModel):
+    """Request for product image analysis endpoint."""
+    image_base64: str = Field(min_length=1, max_length=14_500_000)
+    file_name: str = Field(default="", max_length=255)
+
+
+@app.post("/agent/analyze-product-image")
+async def analyze_product_image_endpoint(req: AnalyzeProductImageRequest):
+    """Analyze a product image using multimodal qwen3.6-plus.
+
+    Returns structured analysis as JSON (not SSE).
+    """
+    multimodal_config = get_multimodal_config()
+
+    if not multimodal_config["api_key"]:
+        raise HTTPException(status_code=500, detail="No multimodal API key configured")
+
+    # Ensure project root is in path for agent imports
+    _project_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..")
+    )
+    if _project_root not in sys.path:
+        sys.path.insert(0, _project_root)
+
+    from agent.image_analysis import analyze_product_image
+
+    try:
+        result = await analyze_product_image(
+            image_base64=req.image_base64,
+            multimodal_config=multimodal_config,
+            file_name=req.file_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return {"success": True, "analysis": result}
+
+
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "multimodal_ready": bool(get_multimodal_config()["api_key"]),
+    }
 
 
 if __name__ == "__main__":

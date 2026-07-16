@@ -20,6 +20,7 @@ import { toNodeHandler } from 'better-auth/node';
 
 // Middleware
 import { errorHandler } from './middleware/errorHandler.js';
+import { isTransientDatabaseError } from './utils/transientErrors.js';
 
 // Routes
 import authRouter, { setPool as setAuthPool } from './routes/auth.js';
@@ -84,7 +85,10 @@ const generalLimiter = createRateLimiter({
   windowMs: 15 * 60 * 1000,
   max: 2000,
   message: { error: '请求过于频繁，请稍后再试' },
-  skip: () => process.env.NODE_ENV !== 'production',
+  skip: (req) => (
+    process.env.NODE_ENV !== 'production' ||
+    req.path === '/api/agent/chat-stream'
+  ),
 });
 
 // Strict rate limiter for auth endpoints: 30 requests per 15 minutes per IP
@@ -97,16 +101,16 @@ const authLimiter = createRateLimiter({
 app.use(generalLimiter);
 app.use('/api/auth/sign-in/email', authLimiter);
 
-// JSON body parser (10 MB limit) with raw body capture for Stripe webhook
+// A 10 MB binary image expands to about 13.4 MB as base64 JSON.
 app.use(express.json({
-  limit: '10mb',
+  limit: '16mb',
   verify: (req, _res, buf) => {
     req.rawBody = buf;
   },
 }));
 
 // URL-encoded form data
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '16mb' }));
 
 // ─── Static Files ────────────────────────────────────────────────────────────
 const uploadsDir = path.join(projectRoot, 'frontend', 'public', 'uploads');
@@ -194,6 +198,14 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 process.on('uncaughtException', (err) => {
   console.error('[Server] Uncaught Exception:', err.message);
   console.error(err.stack);
+  if (isTransientDatabaseError(err)) {
+    // pg/Neon can emit a socket error after a remote compute restart even
+    // after the Pool has discarded that client. The pool remains usable and
+    // will create a fresh connection for the next request, so exiting here
+    // turns a recoverable database event into a full authentication outage.
+    console.warn('[Server] Transient database connection was discarded; service remains available.');
+    return;
+  }
   process.exit(1);
 });
 

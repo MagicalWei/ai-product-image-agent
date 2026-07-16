@@ -31,8 +31,10 @@ export async function initDatabase() {
   }
 
   // Retry connection with backoff
-  let retries = process.env.NODE_ENV === 'test' ? 1 : 5;
-  let delay = process.env.NODE_ENV === 'test' ? 50 : 1000;
+  // Integration tests still use Neon and can hit a suspended compute. Keep
+  // startup retries in test mode too; a fast-fail 3s timeout made CI flaky.
+  let retries = process.env.NODE_ENV === 'test' ? 3 : 5;
+  let delay = process.env.NODE_ENV === 'test' ? 250 : 1000;
 
   while (retries > 0) {
     try {
@@ -75,7 +77,14 @@ function createPool() {
   const p = new Pool({
     connectionString: config.DATABASE_URL,
     ssl: sslConfig,
-    connectionTimeoutMillis: process.env.NODE_ENV === 'test' ? 3000 : 5000,
+    // Neon may need several seconds to wake a suspended compute. A 5 second
+    // timeout caused image-analysis drafts and asset uploads to fail together.
+    connectionTimeoutMillis: 15000,
+    idleTimeoutMillis: 10000,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 5000,
+    max: Number(process.env.DB_POOL_MAX || 10),
+    maxUses: 500,
   });
 
   p.on('error', (err) => {

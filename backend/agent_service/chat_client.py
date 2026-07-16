@@ -9,11 +9,62 @@ import os
 import re
 import base64
 import logging
+import asyncio
 from typing import Dict, List, Any, Optional
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+RETRYABLE_HTTP_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+DEFAULT_HTTP_RETRY_ATTEMPTS = int(os.getenv("AI_HTTP_RETRY_ATTEMPTS", "3"))
+
+
+def _retry_after_seconds(resp: httpx.Response) -> float | None:
+    value = resp.headers.get("Retry-After")
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return None
+
+
+def _http_error_message(provider: str, resp: httpx.Response) -> str:
+    body = resp.text[:500]
+    return f"{provider} API error (HTTP {resp.status_code}): {body}"
+
+
+async def post_json_with_retries(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    headers: Dict[str, str],
+    payload: Dict[str, Any],
+    provider: str,
+    attempts: int = DEFAULT_HTTP_RETRY_ATTEMPTS,
+) -> httpx.Response:
+    """POST JSON with bounded retries for provider throttling/transient errors."""
+    last_resp: httpx.Response | None = None
+    for attempt in range(1, max(1, attempts) + 1):
+        resp = await client.post(url, headers=headers, json=payload)
+        if resp.status_code < 400:
+            return resp
+        last_resp = resp
+        if resp.status_code not in RETRYABLE_HTTP_STATUS or attempt >= attempts:
+            break
+        retry_after = _retry_after_seconds(resp)
+        delay = retry_after if retry_after is not None else min(8.0, 0.8 * (2 ** (attempt - 1)))
+        logger.warning(
+            "[%s] HTTP %s, retrying in %.1fs (%s/%s)",
+            provider,
+            resp.status_code,
+            delay,
+            attempt,
+            attempts,
+        )
+        await asyncio.sleep(delay)
+    raise RuntimeError(_http_error_message(provider, last_resp))
 
 # ========================================================
 # Model capability detection
@@ -25,6 +76,8 @@ def model_supports_vision(model_name: str) -> bool:
     if "gpt-4o" in model_lower:
         return True
     if "vision" in model_lower:
+        return True
+    if any(name in model_lower for name in ("qwen", "doubao-seed", "gemini", "claude-3")):
         return True
     return False
 
@@ -70,15 +123,11 @@ def _build_openai_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any
     for msg in messages:
         role = msg.get("role", "user")
         content = msg.get("content", "")
+        # OpenAI-compatible multimodal endpoints expect content blocks to be
+        # forwarded unchanged. Text-only models are handled by
+        # strip_images_from_messages() before this builder is called.
         if isinstance(content, list):
-            text_parts = []
-            for part in content:
-                if isinstance(part, dict):
-                    if part.get("type") == "text":
-                        text_parts.append(part.get("text", ""))
-                    elif part.get("type") == "image_url":
-                        text_parts.append("[图片数据]")
-            content = "\n".join(text_parts)
+            content = [part.copy() if isinstance(part, dict) else part for part in content]
 
         entry = {"role": role, "content": content}
 
@@ -180,9 +229,13 @@ async def _call_anthropic_api(
         payload["system"] = system_text
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=30.0)) as client:
-        resp = await client.post(url, headers=headers, json=payload)
-        if resp.status_code != 200:
-            raise RuntimeError(f"Anthropic API error (HTTP {resp.status_code}): {resp.text[:500]}")
+        resp = await post_json_with_retries(
+            client,
+            url,
+            headers=headers,
+            payload=payload,
+            provider="Anthropic",
+        )
         data = resp.json()
         return _extract_text_from_response(data, "anthropic")
 
@@ -194,6 +247,7 @@ async def _call_openai_compatible_api(
     model: str,
     tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Optional[str] = None,
+    max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Call OpenAI-compatible chat API. Returns {"content": "...", "tool_calls": [...]}."""
     url = f"{base_url.rstrip('/')}/chat/completions"
@@ -205,14 +259,20 @@ async def _call_openai_compatible_api(
         "model": model,
         "messages": _build_openai_messages(messages),
     }
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = tool_choice or "auto"
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=30.0)) as client:
-        resp = await client.post(url, headers=headers, json=payload)
-        if resp.status_code != 200:
-            raise RuntimeError(f"Chat API error (HTTP {resp.status_code}): {resp.text[:500]}")
+        resp = await post_json_with_retries(
+            client,
+            url,
+            headers=headers,
+            payload=payload,
+            provider="Chat",
+        )
         data = resp.json()
         return _extract_response(data, "openai")
 
@@ -225,16 +285,21 @@ async def _call_chat_api(
     model: str,
     tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Optional[str] = None,
+    supports_vision: Optional[bool] = None,
+    max_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Call chat API. Returns {"content": "...", "tool_calls": [...]}."""
-    if protocol == "anthropic" or not model_supports_vision(model):
+    vision_enabled = model_supports_vision(model) if supports_vision is None else supports_vision
+    if protocol == "anthropic" or not vision_enabled:
         messages = strip_images_from_messages(messages)
 
     if protocol == "anthropic":
         text = await _call_anthropic_api(messages, api_key, base_url, model)
         return {"content": text, "tool_calls": []}
     else:
-        return await _call_openai_compatible_api(messages, api_key, base_url, model, tools, tool_choice)
+        return await _call_openai_compatible_api(
+            messages, api_key, base_url, model, tools, tool_choice, max_tokens
+        )
 
 # ========================================================
 # Fallback executors
@@ -252,6 +317,8 @@ async def execute_chat_with_fallbacks(
             config["api_key"],
             config["base_url"],
             config["model"],
+            supports_vision=config.get("supports_vision"),
+            max_tokens=config.get("max_tokens"),
         )
         return result["content"]
 
@@ -264,25 +331,17 @@ async def execute_chat_with_fallbacks(
         primary_error = str(e1)
         logger.warning(f"[Fallback Chat] Primary model failed: {primary_error}")
 
-    # 2. Fallback 1
-    fb1 = fallbacks[0]
-    if fb1.get("api_key"):
+    # 2. Bounded configured fallbacks
+    for index, fallback in enumerate(fallbacks, start=1):
+        if not fallback.get("api_key"):
+            continue
         try:
-            logger.info(f"[Fallback Chat] Trying Fallback 1: {fb1['model']} ({fb1['protocol']})")
-            return await _try_config(fb1)
-        except Exception as e2:
-            logger.warning(f"[Fallback Chat] Fallback 1 failed: {str(e2)}")
+            logger.info(f"[Fallback Chat] Trying Fallback {index}: {fallback['model']} ({fallback['protocol']})")
+            return await _try_config(fallback)
+        except Exception as fallback_error:
+            logger.warning(f"[Fallback Chat] Fallback {index} failed: {str(fallback_error)}")
 
-    # 3. Fallback 2
-    fb2 = fallbacks[1]
-    if fb2.get("api_key"):
-        try:
-            logger.info(f"[Fallback Chat] Trying Fallback 2: {fb2['model']} ({fb2['protocol']})")
-            return await _try_config(fb2)
-        except Exception as e3:
-            logger.warning(f"[Fallback Chat] Fallback 2 failed: {str(e3)}")
-
-    raise RuntimeError(f"All 3 chat model attempts failed. Primary error: {primary_error}")
+    raise RuntimeError(f"All chat model attempts failed. Primary error: {primary_error}")
 
 
 async def execute_chat_with_fallbacks_full(
@@ -302,6 +361,8 @@ async def execute_chat_with_fallbacks_full(
             config["model"],
             tools=tools,
             tool_choice=tool_choice,
+            supports_vision=config.get("supports_vision"),
+            max_tokens=config.get("max_tokens"),
         )
 
     primary_error = ""
@@ -313,25 +374,16 @@ async def execute_chat_with_fallbacks_full(
         primary_error = str(e1)
         logger.warning(f"[Fallback Chat Full] Primary model failed: {primary_error}")
 
-    # 2. Fallback 1
-    fb1 = fallbacks[0]
-    if fb1.get("api_key"):
+    for index, fallback in enumerate(fallbacks, start=1):
+        if not fallback.get("api_key"):
+            continue
         try:
-            logger.info(f"[Fallback Chat Full] Trying Fallback 1: {fb1['model']} ({fb1['protocol']})")
-            return await _try_config(fb1)
-        except Exception as e2:
-            logger.warning(f"[Fallback Chat Full] Fallback 1 failed: {str(e2)}")
+            logger.info(f"[Fallback Chat Full] Trying Fallback {index}: {fallback['model']} ({fallback['protocol']})")
+            return await _try_config(fallback)
+        except Exception as fallback_error:
+            logger.warning(f"[Fallback Chat Full] Fallback {index} failed: {str(fallback_error)}")
 
-    # 3. Fallback 2
-    fb2 = fallbacks[1]
-    if fb2.get("api_key"):
-        try:
-            logger.info(f"[Fallback Chat Full] Trying Fallback 2: {fb2['model']} ({fb2['protocol']})")
-            return await _try_config(fb2)
-        except Exception as e3:
-            logger.warning(f"[Fallback Chat Full] Fallback 2 failed: {str(e3)}")
-
-    raise RuntimeError(f"All 3 chat model attempts failed. Primary error: {primary_error}")
+    raise RuntimeError(f"All chat model attempts failed. Primary error: {primary_error}")
 
 # ========================================================
 # Image Generation APIs
@@ -351,9 +403,13 @@ async def call_openai_image_api(prompt: str, size: str, negative_prompt: str, co
         "size": size
     }
     async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=30.0)) as client:
-        resp = await client.post(url, headers=headers, json=payload)
-        if resp.status_code != 200:
-            raise RuntimeError(f"OpenAI Image API error (HTTP {resp.status_code}): {resp.text}")
+        resp = await post_json_with_retries(
+            client,
+            url,
+            headers=headers,
+            payload=payload,
+            provider="OpenAI Image",
+        )
         data = resp.json()
         images = data.get("data", [])
         if not images:

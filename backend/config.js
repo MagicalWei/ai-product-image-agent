@@ -18,7 +18,9 @@ if (fs.existsSync(envPath)) {
         if (index !== -1) {
           const key = trimmed.substring(0, index).trim();
           const val = trimmed.substring(index + 1).trim();
-          if (key) {
+          if (key && process.env[key] === undefined) {
+            // Explicit process environment values must win over .env. This is
+            // required for test isolation (PORT/NODE_ENV) and container deploys.
             process.env[key] = val.replace(/^["']|["']$/g, ''); // strip quotes
           }
         }

@@ -95,6 +95,8 @@ export const doubaoAgentSessions = pgTable(
     pendingToolCalls: jsonb('pending_tool_calls').notNull().default('[]'),
     toolResults: jsonb('tool_results').notNull().default('{}'),
     agentMemory: jsonb('agent_memory').notNull().default('{}'),
+    productAnalysisDraft: jsonb('product_analysis_draft').notNull().default('{}'),
+    productAnalysisConfirmed: jsonb('product_analysis_confirmed').notNull().default('{}'),
   },
   (table) => [
     index('idx_sessions_uid').on(table.uid),

@@ -33,6 +33,7 @@ from chat_client import (
     get_image_fallback_configs,
     call_openai_image_api,
     call_anthropic_svg_generator,
+    post_json_with_retries,
 )
 
 logger = logging.getLogger(__name__)
@@ -431,19 +432,22 @@ async def _tool_generate_image(
                 "prompt": prompt,
                 "size": size_doubao,
                 "response_format": "url",
-                "extra_body": {"watermark": True},
+                "extra_body": {"watermark": False},
             }
             if neg_prompt:
                 payload["negative_prompt"] = neg_prompt
             async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=30.0)) as client:
-                response = await client.post(url, headers=headers, json=payload)
-                if response.status_code == 200:
-                    data = response.json()
-                    images = data.get("data", [])
-                    if images:
-                        img_url = images[0].get("url")
-                else:
-                    gen_errors.append(f"HTTP {response.status_code}: {response.text[:200]}")
+                response = await post_json_with_retries(
+                    client,
+                    url,
+                    headers=headers,
+                    payload=payload,
+                    provider="Seedream",
+                )
+                data = response.json()
+                images = data.get("data", [])
+                if images:
+                    img_url = images[0].get("url")
         except Exception as e:
             gen_errors.append(f"Primary: {str(e)}")
 

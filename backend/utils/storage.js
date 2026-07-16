@@ -88,7 +88,7 @@ export class LocalStorage extends StorageProvider {
   async saveFile(buffer, filename) {
     const physicalPath = path.join(this.uploadsDir, filename);
     await fs.promises.writeFile(physicalPath, buffer);
-    return `uploads/${filename}`;
+    return `/uploads/${filename}`;
   }
 
   async deleteFile(filepath) {
@@ -102,7 +102,7 @@ export class LocalStorage extends StorageProvider {
   }
 
   async getFileUrl(filename) {
-    return `uploads/${filename}`;
+    return `/uploads/${filename}`;
   }
 
   async getFileBuffer(filepath) {

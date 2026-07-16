@@ -19,7 +19,7 @@ from agent_loop import run_unified_agent
 logger = logging.getLogger(__name__)
 
 # Feature flag: "unified" | "sense-decide-act-review" | "multi-agent"
-AGENT_ARCHITECTURE = os.getenv("AGENT_ARCHITECTURE", "multi-agent")
+AGENT_ARCHITECTURE = os.getenv("AGENT_ARCHITECTURE", "sense-decide-act-review")
 
 
 async def run_pipeline(inputs: Dict[str, Any]) -> Dict[str, Any]:
@@ -70,6 +70,11 @@ async def run_pipeline_stream(inputs: Dict[str, Any]):
         "base_url": inputs.get("chat_vision_model_base_url", "https://api.openai.com/v1"),
         "model": inputs.get("chat_vision_model_name", "gpt-4o"),
     }
+    multimodal_config = {
+        "api_key": inputs.get("multimodal_api_key", os.getenv("DASHSCOPE_API_KEY", "")),
+        "base_url": inputs.get("multimodal_base_url", os.getenv("MULTIMODAL_BASE_URL", "https://ws-kbw1pwxjomfj4o8k.cn-beijing.maas.aliyuncs.com/compatible-mode/v1")),
+        "model": inputs.get("multimodal_model", os.getenv("MULTIMODAL_MODEL", "qwen3.6-plus")),
+    }
 
     # ── Load AgentMemory ──
     memory = AgentMemory.from_dict(inputs.get("agent_memory"))
@@ -79,11 +84,11 @@ async def run_pipeline_stream(inputs: Dict[str, Any]):
     # Sync product info from inputs into memory
     if product_name and not memory.product_name:
         memory.product_name = product_name
-    if selling_points and not memory.selling_points:
+    if selling_points and (inputs.get("product_set_mode") or not memory.selling_points):
         memory.selling_points = selling_points
-    if inputs.get("image_types") and not memory.image_types:
+    if inputs.get("image_types") and (inputs.get("product_set_mode") or inputs.get("style_transfer_mode") or not memory.image_types):
         memory.image_types = inputs.get("image_types", [])
-    if inputs.get("style_preference") and not memory.style_preference:
+    if inputs.get("style_preference") and (inputs.get("product_set_mode") or not memory.style_preference):
         memory.style_preference = inputs.get("style_preference", "")
     if inputs.get("ecom_platform") and not memory.ecom_platform:
         memory.ecom_platform = inputs.get("ecom_platform", "")
@@ -128,9 +133,13 @@ async def run_pipeline_stream(inputs: Dict[str, Any]):
             memory=memory,
             cheap_model_config=cheap_model_config,
             vision_model_config=vision_model_config,
+            multimodal_config=multimodal_config,
             image_model_key=image_model_key,
             rag_retriever=rag_retriever,
             product_image_base64=inputs.get("product_image_base64", ""),
+            style_reference_images=inputs.get("style_reference_images", []),
+            style_transfer_mode=inputs.get("style_transfer_mode", False),
+            product_set_mode=inputs.get("product_set_mode", False),
         ):
             yield event
     elif AGENT_ARCHITECTURE == "multi-agent":
@@ -142,6 +151,8 @@ async def run_pipeline_stream(inputs: Dict[str, Any]):
             image_model_key=image_model_key,
             rag_retriever=rag_retriever,
             product_image_base64=inputs.get("product_image_base64", ""),
+            reference_images=inputs.get("reference_images", []),
+            multimodal_config=multimodal_config,
         ):
             yield event
     else:
@@ -162,9 +173,13 @@ async def _run_new_loop(
     memory: AgentMemory,
     cheap_model_config: Dict[str, str],
     vision_model_config: Dict[str, str],
+    multimodal_config: Dict[str, str],
     image_model_key: str,
     rag_retriever: Any = None,
     product_image_base64: str = "",
+    style_reference_images: list[str] | None = None,
+    style_transfer_mode: bool = False,
+    product_set_mode: bool = False,
 ):
     """Run the new sense-decide-act-review loop."""
     # Ensure project root is in path for agent imports
@@ -205,12 +220,16 @@ async def _run_new_loop(
         chat_config=cheap_model_config,
         vision_config=vision_model_config,
         image_config=image_config,
+        multimodal_config=multimodal_config,
     )
 
     async for event in loop.run(
         message=message,
         memory=memory,
         product_image_base64=product_image_base64,
+        style_reference_images=style_reference_images or [],
+        style_transfer_mode=style_transfer_mode,
+        product_set_mode=product_set_mode,
         canvas_id=session_canvas_id,
         rag_retriever=rag_retriever,
     ):
@@ -229,6 +248,8 @@ async def _run_multi_agent(
     image_model_key: str,
     rag_retriever: Any = None,
     product_image_base64: str = "",
+    reference_images: list[str] = None,
+    multimodal_config: Dict[str, str] = None,
 ):
     """Run the multi-agent architecture."""
     _project_root = os.path.abspath(
@@ -247,6 +268,7 @@ async def _run_multi_agent(
         chat_config=cheap_model_config,
         image_config=image_config,
         vision_config=vision_model_config,
+        multimodal_config=multimodal_config or {},
         rag_retriever=rag_retriever,
     )
 
@@ -254,5 +276,6 @@ async def _run_multi_agent(
         message=message,
         memory=memory,
         product_image_base64=product_image_base64,
+        reference_images=reference_images or [],
     ):
         yield event
