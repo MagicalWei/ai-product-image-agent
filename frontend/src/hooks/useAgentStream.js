@@ -41,6 +41,7 @@ export function useAgentStream(deps) {
     currentSessionId,
     IMAGE_TYPE_LABELS,
   } = deps;
+  const streamingResultRef = useRef(streamingResult);
 
   const handleSSEEvent = useCallback((event) => {
     switch (event.event) {
@@ -88,18 +89,18 @@ export function useAgentStream(deps) {
       }
 
       case 'phase_complete':
-        if (streamingResult) {
-          streamingResult.product_name = event.product_name || '';
-          streamingResult.selling_points = event.selling_points || '';
-          streamingResult.image_types = event.image_types || [];
-          streamingResult.style_preference = event.style_preference || '';
+        if (streamingResultRef.current) {
+          streamingResultRef.current.product_name = event.product_name || '';
+          streamingResultRef.current.selling_points = event.selling_points || '';
+          streamingResultRef.current.image_types = event.image_types || [];
+          streamingResultRef.current.style_preference = event.style_preference || '';
         }
         break;
 
       // ── Image generation events ──
       case 'image_progress':
-        if (streamingResult) {
-          streamingResult.generated_images[event.image_type] = event.url;
+        if (streamingResultRef.current) {
+          streamingResultRef.current.generated_images[event.image_type] = event.url;
         }
         {
           const imgType = event.image_type || '图片';
@@ -111,8 +112,8 @@ export function useAgentStream(deps) {
         break;
 
       case 'image_done':
-        if (streamingResult) {
-          streamingResult.generated_images = event.all_images || {};
+        if (streamingResultRef.current) {
+          streamingResultRef.current.generated_images = event.all_images || {};
         }
         if (event.warning) {
           setChatMessages(prev => [...prev, {
@@ -143,9 +144,9 @@ export function useAgentStream(deps) {
         break;
 
       case 'images_saved':
-        if (event.images && streamingResult) {
-          const prevImages = { ...streamingResult.generated_images };
-          streamingResult.generated_images = { ...prevImages, ...event.images };
+        if (event.images && streamingResultRef.current) {
+          const prevImages = { ...streamingResultRef.current.generated_images };
+          streamingResultRef.current.generated_images = { ...prevImages, ...event.images };
           Object.entries(event.images).forEach(([imgType, localUrl]) => {
             const oldUrl = prevImages[imgType];
             if (oldUrl && oldUrl !== localUrl) {
@@ -230,7 +231,6 @@ export function useAgentStream(deps) {
     setChatMessages,
     setProductInfo,
     setCurrentUser,
-    streamingResult,
     infiniteCanvasRef,
     saveCanvasState,
     currentSessionId,

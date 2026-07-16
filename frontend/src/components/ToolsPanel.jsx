@@ -196,13 +196,13 @@ export default function ToolsPanel({ currentVersion }) {
     { id: 'copy', name: '爆款图复刻', icon: Layers, desc: '输入竞品链接，高保真仿制其构图与场景风格' },
   ];
 
-  const getImgSrc = (imgNameOrData) => {
+  function getImgSrc(imgNameOrData) {
     if (!imgNameOrData) return '';
     if (imgNameOrData.startsWith('data:') || imgNameOrData.startsWith('blob:')) {
       return imgNameOrData;
     }
     return `assets/${imgNameOrData}`;
-  };
+  }
 
   const handleRunTool = async () => {
     setProcessState('processing');

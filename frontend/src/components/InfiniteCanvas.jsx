@@ -2,6 +2,9 @@ import React, { useState, useEffect, useRef, useImperativeHandle } from 'react';
 import { Move, Hand, Pencil, Square, Circle, ArrowUpRight, Type, StickyNote, Trash2, Sun, Moon, Plus, Minus, Maximize2, RotateCcw, Cpu, MessageSquare, Layers, Undo, Redo, Send, Image as ImageIcon, Eye, EyeOff, Lock, Unlock, ChevronUp, ChevronDown, ChevronsUp, ChevronsDown, Grid, Copy, ChevronDownIcon, User, Lightbulb, ShieldAlert, Zap, X } from 'lucide-react';
 import * as Accordion from '@radix-ui/react-accordion';
 import './InfiniteCanvas.css';
+import ProductAnalysisCard from './ProductAnalysisCard';
+import { composeImageWithRegions, createImageEditRegion } from '../lib/regionEdit';
+import { isReferenceCanvasImage } from '../lib/canvasImages';
 
 const AGENT_CONFIGS = {
   orchestrator: { name: '编排助手', color: 'var(--primary)' },
@@ -28,7 +31,7 @@ const STITCH_COLORS = [
 
 const getStitchColor = (index) => STITCH_COLORS[index % STITCH_COLORS.length];
 
-const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelity, isGenerating, setIsGenerating, onImportImageAsset, autoCutout = true, setAutoCutout, processCutout, chatMessages = [], isTyping = false, onRecommendationAction, evalModel = 'eval_standard', onSendMessage, chatInputValue, onInputValueChange, currentSessionId, saveCanvasState, initialCanvasState, onAttachImageToChat, attachedImages = [], onRemoveAttachedImage }, ref) => {
+const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelity, isGenerating, setIsGenerating, onImportImageAsset, autoCutout = true, setAutoCutout, processCutout, chatMessages = [], isTyping = false, onRecommendationAction, evalModel = 'eval_standard', onSendMessage, chatInputValue, onInputValueChange, currentSessionId, saveCanvasState, initialCanvasState, onAttachImageToChat, attachedImages = [], onRemoveAttachedImage, onAddStyleReference, onImageAdded, onConfirmProductAnalysis, onRetryProductAnalysis, isConfirmingProductAnalysis = false }, ref) => {
   const [camera, setCamera] = useState(() => {
     try {
       const saved = localStorage.getItem('infinite_canvas_camera');
@@ -410,11 +413,16 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
     return Math.round(Math.max(50, Math.min(calculated, 120))); // Limit to comfortable visual range (50px to 120px)
   };
 
-  const insertImageLayer = (url, name, onError) => {
+  const insertImageLayer = (url, name, onError, options = {}) => {
+    if (!url || pendingImageUrlsRef.current.has(url) || elementsRef.current.some(el => el.type === 'image' && el.url === url)) {
+      return;
+    }
+    pendingImageUrlsRef.current.add(url);
     const rect = svgRef.current ? svgRef.current.getBoundingClientRect() : { width: 800, height: 600 };
 
     const img = new Image();
     img.onload = () => {
+      pendingImageUrlsRef.current.delete(url);
       const width = img.naturalWidth || 300;
       const height = img.naturalHeight || 400;
 
@@ -446,18 +454,21 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
       }
 
       const newImageElement = {
-        id: 'image-' + Date.now(),
+        id: `image-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
         type: 'image',
         x: elementX,
         y: elementY,
         width: width,
         height: height,
         url: url,
-        name: name || '导入图层'
+        name: name || '导入图层',
+        source: options.source || 'user_uploaded',
+        isGenerated: options.source === 'ai_generated'
       };
 
       pushToHistory();
-      setElements(prev => [...prev, newImageElement]);
+      elementsRef.current = [...elementsRef.current, newImageElement];
+      setElements(elementsRef.current);
 
       if (isFirstElement) {
         setCamera({
@@ -468,6 +479,7 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
       }
     };
     img.onerror = () => {
+      pendingImageUrlsRef.current.delete(url);
       console.warn('[InfiniteCanvas] Image load failed for:', url);
       if (onError) {
         onError(url);
@@ -505,17 +517,20 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
       }
 
       const newImageElement = {
-        id: 'image-' + Date.now(),
+        id: `image-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
         type: 'image',
         x: elementX,
         y: elementY,
         width: width,
         height: height,
         url: url,
-        name: name || '导入图层'
+        name: name || '导入图层',
+        source: options.source || 'user_uploaded',
+        isGenerated: options.source === 'ai_generated'
       };
       pushToHistory();
-      setElements(prev => [...prev, newImageElement]);
+      elementsRef.current = [...elementsRef.current, newImageElement];
+      setElements(elementsRef.current);
 
       if (isFirstElement) {
         setCamera({
@@ -550,12 +565,14 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
           reader.readAsDataURL(file);
         });
 
+        // Product analysis should start as soon as the original image is
+        // decoded. Cloud sync and optional cutout can continue in parallel.
+        if (onImageAdded) onImageAdded(base64Url, file.name);
+
         if (onImportImageAsset) {
-          try {
-            onImportImageAsset(file.name, base64Url);
-          } catch (err) {
+          Promise.resolve(onImportImageAsset(file.name, base64Url)).catch((err) => {
             console.error("onImportImageAsset failed:", err);
-          }
+          });
         }
 
         let finalUrl = base64Url;
@@ -584,7 +601,7 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
           img.src = finalUrl;
         });
 
-        loadedFiles.push({ file, base64Url: finalUrl, ...dimensions });
+        loadedFiles.push({ file, base64Url: finalUrl, originalBase64Url: base64Url, ...dimensions });
       }
 
       const totalWidth = loadedFiles.reduce((sum, f) => sum + f.width, 0) + (loadedFiles.length - 1) * gap;
@@ -625,7 +642,9 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
           width: lf.width,
           height: lf.height,
           url: lf.base64Url,
-          name: lf.file.name || `图片图层-${i+1}`
+          name: lf.file.name || `图片图层-${i+1}`,
+          source: 'user_uploaded',
+          isGenerated: false
         });
         currentX += lf.width + gap;
       }
@@ -919,6 +938,7 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
   const [future, setFuture] = useState([]);
 
   const elementsRef = useRef(elements);
+  const pendingImageUrlsRef = useRef(new Set());
   const pastRef = useRef(past);
   const futureRef = useRef(future);
   const dragStartElementsRef = useRef(null);
@@ -1483,7 +1503,7 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
     }
   };
 
-  const handlePointerUp = () => {
+  const handlePointerUp = async () => {
     setIsPointerDown(false);
 
     if (resizeInfo) {
@@ -1512,8 +1532,50 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
       }
 
       if (isValid) {
+        let shapeToAdd = tempShape;
+
+        // A rectangle drawn over an image is an edit-region selection. Clip it
+        // to the image, compose source+frame, and place that composite directly
+        // above the chat input as the next image-Agent attachment.
+        if (tempShape.type === 'rect') {
+          const editSelection = createImageEditRegion(tempShape, elements);
+          if (editSelection) {
+              const { targetImage, region } = editSelection;
+              shapeToAdd = region;
+              try {
+                const previousRegions = elements.filter(el =>
+                  el.type === 'rect' && el.isEditRegion && el.imageId === targetImage.id
+                );
+                const annotatedUrl = await composeImageWithRegions(
+                  targetImage,
+                  [...previousRegions, shapeToAdd],
+                  getImageUrl(targetImage.url),
+                );
+                onAttachImageToChat?.({
+                  id: `region-edit-${Date.now()}`,
+                  url: annotatedUrl,
+                  name: `框选编辑·${targetImage.name || '图片'}`,
+                  kind: 'region_edit',
+                  sourceImageId: targetImage.id,
+                  sourceImageUrl: targetImage.url,
+                  regions: [...previousRegions, shapeToAdd].map(region => ({
+                    relX: region.relX,
+                    relY: region.relY,
+                    width: region.width,
+                    height: region.height,
+                    color: region.color,
+                  })),
+                });
+                setActiveTool('select');
+              } catch (error) {
+                console.error('[Canvas] Failed to compose region attachment:', error);
+                alert('框选图片合成失败，请确认原图可正常加载后重试。');
+              }
+          }
+        }
+
         pushToHistory();
-        setElements(prev => [...prev, tempShape]);
+        setElements(prev => [...prev, shapeToAdd]);
       }
       setTempShape(null);
     } else if (activeTool === 'stitch' && tempShape) {
@@ -1799,57 +1861,14 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
 
 
 
-  // 在原图上绘制颜色矩形框+标签，返回 base64 data URL
-  const getImageWithColorBoxes = (imageId) => {
+  // 在原图上绘制颜色矩形框，返回 base64 data URL
+  const getImageWithColorBoxes = async (imageId) => {
     const targetImage = elements.find(el => el.id === imageId);
     if (!targetImage || targetImage.type !== 'image') return null;
 
     const stitchBoxes = elements.filter(el => el.type === 'stitch' && el.imageId === imageId);
     if (stitchBoxes.length === 0) return null;
-
-    const canvas = document.createElement('canvas');
-    canvas.width = targetImage.width;
-    canvas.height = targetImage.height;
-    const ctx = canvas.getContext('2d');
-
-    // Draw original image
-    const img = new Image();
-    img.src = getImageUrl(targetImage.url);
-    // Since we can't wait for async, we use a sync approach via an already-loaded image
-    // We draw the colored boxes directly
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    stitchBoxes.forEach((box) => {
-      const colorInfo = STITCH_COLORS.find(c => c.color === box.color) || { color: '#3B82F6', colorName: '蓝色', emoji: '🔵' };
-      // Fill with semi-transparent color
-      ctx.fillStyle = box.color + '1A'; // ~10% opacity
-      ctx.fillRect(box.relX, box.relY, box.width, box.height);
-      // Border
-      ctx.strokeStyle = box.color;
-      ctx.lineWidth = 3;
-      ctx.strokeRect(box.relX, box.relY, box.width, box.height);
-      // Label
-      const label = `${colorInfo.emoji} ${box.label || ''}`;
-      const fontSize = Math.max(14, Math.min(box.width, box.height) * 0.18);
-      ctx.font = `bold ${fontSize}px "Inter", system-ui, sans-serif`;
-      const textMetrics = ctx.measureText(label);
-      const textWidth = textMetrics.width;
-      const textHeight = fontSize;
-      const padding = 6;
-      // Label background
-      ctx.fillStyle = box.color;
-      const labelX = box.relX;
-      const labelY = box.relY - textHeight - padding * 2;
-      ctx.beginPath();
-      ctx.roundRect(labelX, labelY > 0 ? labelY : box.relY, textWidth + padding * 2, textHeight + padding * 2, 4);
-      ctx.fill();
-      // Label text
-      ctx.fillStyle = '#FFFFFF';
-      ctx.fillText(label, labelX + padding, (labelY > 0 ? labelY : box.relY) + textHeight + padding * 0.5);
-    });
-
-    return canvas.toDataURL('image/png');
+    return composeImageWithRegions(targetImage, stitchBoxes, getImageUrl(targetImage.url));
   };
 
   // drawColorBoxOnCanvas — 在给定 canvas context 上画单个颜色框
@@ -1915,7 +1934,7 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
     if (setIsGenerating) setIsGenerating(true);
 
     try {
-      const annotatedImage = getImageWithColorBoxes(imageId);
+      const annotatedImage = await getImageWithColorBoxes(imageId);
 
       const response = await fetch('/api/generate/inpaint', {
         method: 'POST',
@@ -1979,12 +1998,11 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
             const reader = new FileReader();
             reader.onload = async (readerEvent) => {
               const base64Url = readerEvent.target.result;
+              if (onImageAdded) onImageAdded(base64Url, file.name);
               if (onImportImageAsset) {
-                try {
-                  onImportImageAsset(file.name, base64Url);
-                } catch (err) {
+                Promise.resolve(onImportImageAsset(file.name, base64Url)).catch((err) => {
                   console.error("onImportImageAsset failed:", err);
-                }
+                });
               }
               
               let finalUrl = base64Url;
@@ -2818,6 +2836,36 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
             const agentKey = msg.agent || 'coordinator';
             const agentInfo = AGENT_CONFIGS[agentKey] || AGENT_CONFIGS.coordinator;
 
+            // Product analysis card
+            if (msg.type === 'product_analysis_loading') {
+              return (
+                <div key={msg.id || index} className="sidebar-msg sidebar-msg--ai">
+                  <span className="sidebar-msg__agent" style={{ color: 'var(--primary)' }}>图片分析</span>
+                  <div className="sidebar-msg__bubble">{msg.text}</div>
+                </div>
+              );
+            }
+
+            if (msg.type === 'product_analysis' && msg.data) {
+              return (
+                <div key={msg.id || index} className="sidebar-msg sidebar-msg--ai">
+                  <span className="sidebar-msg__agent" style={{ color: 'var(--primary)' }}>
+                    图片分析
+                  </span>
+                  <div className="sidebar-msg__bubble" style={{ padding: 0, background: 'transparent', border: 'none' }}>
+                    <ProductAnalysisCard
+                      key={`${msg.id || index}-${msg.data.status || 'error'}-${msg.data.product?.product_name || msg.data.error || ''}`}
+                      analysis={msg.data}
+                      confirmed={Boolean(msg.confirmed || msg.data.status === 'confirmed')}
+                      isConfirming={isConfirmingProductAnalysis}
+                      onConfirm={(analysis) => onConfirmProductAnalysis?.(analysis, msg.id)}
+                      onRetry={() => onRetryProductAnalysis?.(msg.id)}
+                    />
+                  </div>
+                </div>
+              );
+            }
+
             return (
               <div key={index} className={`sidebar-msg ${isAi ? 'sidebar-msg--ai' : 'sidebar-msg--user'}`}>
                 {isAi && (
@@ -2826,6 +2874,13 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
                   </span>
                 )}
                 <div className="sidebar-msg__bubble">
+                  {msg.images && msg.images.length > 0 && (
+                    <div className="sidebar-msg__attachments">
+                      {msg.images.map((img, i) => (
+                        <img key={i} src={getImageUrl(img.url)} alt={img.name} className="sidebar-msg__attachment-thumb" />
+                      ))}
+                    </div>
+                  )}
                   {msg.text}
                   {msg.recommendation && (
                     <div className="sidebar-msg__reco">
@@ -2859,6 +2914,29 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
         {onSendMessage && (
           <div className="chat-sidebar-input-row">
             <div className="chat-quick-actions">
+              <label className="chat-quick-btn" title="上传一张只用于提取视觉风格的参考图" style={{ cursor: isGenerating ? 'not-allowed' : 'pointer' }}>
+                🎨 风格参考图
+                <input
+                  type="file"
+                  accept="image/*"
+                  disabled={isGenerating}
+                  style={{ display: 'none' }}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) onAddStyleReference?.(file);
+                    event.target.value = '';
+                  }}
+                />
+              </label>
+              {attachedImages?.some(image => image.role === 'style_reference') && (
+                <button
+                  className="chat-quick-btn"
+                  disabled={isGenerating}
+                  onClick={() => onSendMessage('按照参考图风格，为新产品生成主图、卖点图、详情图', null, { image_types: ['main', 'selling_point', 'detail'] })}
+                >
+                  <Zap size={11} /> 生成风格套图
+                </button>
+              )}
               <button
                 className="chat-quick-btn"
                 title="快速生成：跳过信息收集，直接生图"
@@ -2906,7 +2984,7 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
                 {attachedImages.map(img => (
                   <div key={img.id} className="attachment-chip">
                     <img src={getImageUrl(img.url)} alt={img.name || '附件'} />
-                    <span className="attachment-chip-name">{img.name || '图片'}</span>
+                    <span className="attachment-chip-name">{img.role === 'style_reference' ? '风格参考 · ' : ''}{img.name || '图片'}</span>
                     <button
                       className="attachment-chip-remove"
                       onClick={() => onRemoveAttachedImage?.(img.id)}
@@ -3022,7 +3100,7 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
                     </button>
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px', maxHeight: '140px', overflowY: 'auto' }}>
-                    {elements.filter(el => el.type === 'image').map((el, idx) => (
+                    {elements.filter(isReferenceCanvasImage).map((el, idx) => (
                       <div
                         key={el.id}
                         style={{ position: 'relative', borderRadius: '6px', overflow: 'hidden', border: selectedId === el.id ? '2px solid var(--primary)' : '1px solid rgba(255, 255, 255, 0.1)', aspectRatio: '1', cursor: 'pointer', background: 'rgba(0,0,0,0.2)' }}
@@ -3051,7 +3129,7 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
                         >✕</button>
                       </div>
                     ))}
-                    {elements.filter(el => el.type === 'image').length === 0 && (
+                    {elements.filter(isReferenceCanvasImage).length === 0 && (
                       <div style={{ gridColumn: 'span 3', color: 'var(--text-secondary)', fontSize: '0.65rem', textAlign: 'center', padding: '12px 0', opacity: 0.7 }}>
                         暂无已上传的样板图片
                       </div>
@@ -3068,6 +3146,3 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
 });
 
 export default InfiniteCanvas;
-
-
-

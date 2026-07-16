@@ -13,13 +13,17 @@ export const useAuth = () => {
   return context;
 };
 
+const DEFAULT_AUTH_BASE = typeof window !== 'undefined'
+  ? `${window.location.origin}/api/auth`
+  : '/api/auth';
+
 const authClient = createAuthClient({
-  baseURL: import.meta.env.VITE_BETTER_AUTH_URL || 'http://localhost:3000/api/auth',
+  baseURL: import.meta.env.VITE_BETTER_AUTH_URL || DEFAULT_AUTH_BASE,
 });
 
 const { useSession, signIn, signUp, signOut } = authClient;
 
-const AUTH_BASE = import.meta.env.VITE_BETTER_AUTH_URL || 'http://localhost:3000/api/auth';
+const AUTH_BASE = import.meta.env.VITE_BETTER_AUTH_URL || DEFAULT_AUTH_BASE;
 
 export const AuthProvider = ({ children }) => {
   const { data: session, isPending, refetch } = useSession();
@@ -38,34 +42,36 @@ export const AuthProvider = ({ children }) => {
       setCurrentUser(mappedUser);
       localStorage.setItem('design_studio_current_user', JSON.stringify(mappedUser));
     } else if (!isPending) {
-      // No valid session — clear local state.
-      // Using a flag to distinguish "no session yet" from "logged out".
-      // After signOut, localStorage is already cleared by logout().
-      // We still check localStorage as a fallback for page-load before
-      // useSession has fetched, but only if we haven't explicitly logged out.
-      const loggedOut = sessionStorage.getItem('ba_logged_out');
-      if (!loggedOut) {
-        const saved = localStorage.getItem('design_studio_current_user');
-        if (saved) {
-          try {
-            setCurrentUser(JSON.parse(saved));
-          } catch {
-            setCurrentUser(null);
-          }
-          return;
-        }
-      }
+      // Once the server confirms there is no valid cookie session, never
+      // restore a stale local profile. Doing so leaves the UI looking logged
+      // in while every protected request returns 401.
       setCurrentUser(null);
+      localStorage.removeItem('design_studio_current_user');
     }
   }, [session, isPending]);
 
   const login = async (email, password) => {
-    const result = await signIn.email({ email, password });
+    const credentials = { email: email.trim().toLowerCase(), password };
+    let result;
+    try {
+      result = await signIn.email(credentials);
+      const status = Number(result?.error?.status || result?.error?.statusCode || 0);
+      if (result?.error && status >= 500) {
+        await new Promise(resolve => setTimeout(resolve, 300));
+        result = await signIn.email(credentials);
+      }
+    } catch (error) {
+      // One short retry handles a backend restart or a transient network drop.
+      await new Promise(resolve => setTimeout(resolve, 300));
+      try {
+        result = await signIn.email(credentials);
+      } catch {
+        throw new Error('登录服务暂时不可用，请稍后重试');
+      }
+    }
     if (result.error) {
       throw new Error(result.error.message || '登录失败');
     }
-    // Clear the logout flag so localStorage fallback can work on next page load
-    sessionStorage.removeItem('ba_logged_out');
     // Explicitly refetch session to ensure cookie is processed and state is synced
     await refetch();
     return result;
@@ -88,16 +94,11 @@ export const AuthProvider = ({ children }) => {
     if (result.error) {
       throw new Error(result.error.message || '登录失败');
     }
-    // Clear the logout flag and refetch session
-    sessionStorage.removeItem('ba_logged_out');
     await refetch();
     return result;
   };
 
   const logout = useCallback(async () => {
-    // Set logout flag BEFORE signOut to prevent localStorage fallback
-    // from restoring user state during the signOut→refetch cycle
-    sessionStorage.setItem('ba_logged_out', '1');
     try {
       await signOut();
     } catch (err) {
@@ -163,17 +164,6 @@ export const AuthProvider = ({ children }) => {
     });
     if (result.error) {
       throw new Error(result.error.message || '发送验证码失败');
-    }
-    // Manually trigger verification email send after sign-up
-    // (Better Auth's signUp background task may not execute in non-standard runtimes)
-    try {
-      await fetch(`${AUTH_BASE}/send-verification-email`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email }),
-      });
-    } catch (e) {
-      console.warn('sendVerificationEmail fetch failed:', e.message);
     }
     return result;
   }, []);

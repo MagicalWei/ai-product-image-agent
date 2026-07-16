@@ -87,7 +87,7 @@ export default function PaymentModal({ onClose, onPaymentSuccess, currentUser })
       }
 
       if (data.order && data.order.checkoutUrl) {
-        window.location.href = data.order.checkoutUrl;
+        window.location.assign(data.order.checkoutUrl);
       } else {
         throw new Error(data.error || '未获取到有效的支付结账链接');
       }

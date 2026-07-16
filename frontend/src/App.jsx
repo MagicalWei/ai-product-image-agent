@@ -1,24 +1,25 @@
 // src/App.jsx
 import React, { useState, useEffect, useRef, Suspense } from 'react';
-import { Sparkles, Bell, HelpCircle, ArrowRight, Settings, AlertCircle, CheckCircle, Menu, Home, Grid, Layers, History, FolderOpen, Database, Sun, Moon, MessageSquare, Box, Tag, Type, Image as ImageIcon, X, Minus, ChevronDown, ChevronUp, Play, Download, Share2, Loader2, BookOpen, Video, ShoppingBag, User, Users, Wand2, Zap, Crown } from 'lucide-react';
+import { Sparkles, Bell, HelpCircle, ArrowRight, Settings, AlertCircle, CheckCircle, Menu, Home, Grid, Layers, History, FolderOpen, Database, Sun, Moon, MessageSquare, Box, Tag, Type, Image as ImageIcon, X, Minus, Plus, ChevronDown, ChevronUp, Play, Download, Share2, Loader2, BookOpen, Video, ShoppingBag, User, Users, Wand2, Zap, Crown } from 'lucide-react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 
-// Eagerly imported components (small / always needed)
-import DashboardPanel from './components/DashboardPanel';
-import ToolsPanel from './components/ToolsPanel';
-import HistoryPanel from './components/HistoryPanel';
-import FoldersPanel from './components/FoldersPanel';
-import DatabaseView from './components/DatabaseView';
-import SessionsPanel from './components/SessionsPanel';
+// Eagerly imported shell component.
 import Sidebar from './components/Sidebar';
-import LayersOutlinePanel from './components/LayersOutlinePanel';
-import ExportModal from './components/ExportModal';
 
 import { evaluateImageWithGemini, isValidApiKeyFormat } from './utils/geminiEvaluator';
 import { removeBackground } from '@imgly/background-removal';
 import { resolveAssetUrl } from './lib/utils';
+import { routeMessageForAttachments } from './lib/imageAgentRouting';
 
 // Lazy-loaded components for code splitting
+const DashboardPanel = React.lazy(() => import('./components/DashboardPanel'));
+const ToolsPanel = React.lazy(() => import('./components/ToolsPanel'));
+const HistoryPanel = React.lazy(() => import('./components/HistoryPanel'));
+const FoldersPanel = React.lazy(() => import('./components/FoldersPanel'));
+const DatabaseView = React.lazy(() => import('./components/DatabaseView'));
+const SessionsPanel = React.lazy(() => import('./components/SessionsPanel'));
+const LayersOutlinePanel = React.lazy(() => import('./components/LayersOutlinePanel'));
+const ExportModal = React.lazy(() => import('./components/ExportModal'));
 const Portal = React.lazy(() => import('./components/Portal'));
 const InfiniteCanvas = React.lazy(() => import('./components/InfiniteCanvas'));
 const Onboarding = React.lazy(() => import('./components/Onboarding'));
@@ -165,6 +166,7 @@ const IMAGE_TYPE_LABELS = {
   main: { name: '主图' },
   icon: { name: '图标' },
   selling_point: { name: '卖点图' },
+  detail: { name: '详情图' },
   comparison: { name: '对比图' },
   scene_selling: { name: '场景卖点图' },
   structure: { name: '结构图' },
@@ -301,15 +303,50 @@ function AppInner() {
   const [brandFont, setBrandFont] = useState(() => localStorage.getItem('brand_font') || 'Inter');
   const [brandName, setBrandName] = useState(() => localStorage.getItem('brand_name') || '');
 
+  // Product image analysis state (canvas upload → multimodal analysis)
+  const [isAnalyzingProductImage, setIsAnalyzingProductImage] = useState(false);
+  const [productImageAnalysis, setProductImageAnalysis] = useState(null);
+  const [isConfirmingProductAnalysis, setIsConfirmingProductAnalysis] = useState(false);
+  const [productAnalysisSource, setProductAnalysisSource] = useState(null);
+  const productAnalysisInFlightRef = useRef(false);
+  const activeSessionIdRef = useRef(currentSessionId);
+  const sessionCreationPromiseRef = useRef(null);
+  const agentRequestInFlightRef = useRef(false);
+  // Track the base64 of images added to canvas for sending to LLM
+  const [canvasProductImageBase64, setCanvasProductImageBase64] = useState('');
+
+  useEffect(() => {
+    activeSessionIdRef.current = currentSessionId;
+  }, [currentSessionId]);
+
+  const ensureActiveSession = async (title = '新设计会话') => {
+    if (activeSessionIdRef.current) return activeSessionIdRef.current;
+    if (!sessionCreationPromiseRef.current) {
+      sessionCreationPromiseRef.current = createSession(title)
+        .then((sessionId) => {
+          if (sessionId) {
+            activeSessionIdRef.current = sessionId;
+            setCurrentSessionId(sessionId);
+          }
+          return sessionId;
+        })
+        .finally(() => {
+          sessionCreationPromiseRef.current = null;
+        });
+    }
+    return sessionCreationPromiseRef.current;
+  };
+
 
   // ---- Homepage Quick Tools States ----
   const [currentQuickTool, setCurrentQuickTool] = useState(null);
   const [showDetailGeneratorModal, setShowDetailGeneratorModal] = useState(false);
+  const [detailUploadBase64, setDetailUploadBase64] = useState('');
   
   // Set generator (商品套图) states
   const [showSetGeneratorModal, setShowSetGeneratorModal] = useState(false);
   const [setUploadBase64, setSetUploadBase64] = useState('');
-  const [selectedSetSizes, setSelectedSetSizes] = useState(['1:1', '9:16']);
+  const [selectedSetSizes, setSelectedSetSizes] = useState(['main', 'selling_point', 'detail']);
   const [chosenSetStyle, setChosenSetStyle] = useState('minimalist_white');
 
   // Copy generator (风格复刻) states
@@ -857,14 +894,69 @@ function AppInner() {
 
 
 
-  const handleGenerateSet = (productImg, chosenStyleId, selectedSizes) => {
-    setShowSetGeneratorModal(false);
+  const prepareQuickToolSession = async ({ title, productImg, styleRefImg = '' }) => {
+    const sessionId = await createSession(title);
+    if (!sessionId) throw new Error('无法创建生成会话，请稍后重试');
+
+    activeSessionIdRef.current = sessionId;
+    setCurrentSessionId(sessionId);
+    setCanvasProductImageBase64(productImg);
+    const uploads = [addUploadedAsset(`${title}_商品图.png`, productImg, 'raw')];
+    if (styleRefImg) uploads.push(addUploadedAsset(`${title}_风格参考图.png`, styleRefImg, 'style_reference'));
+    await Promise.allSettled(uploads);
     setView('workspace');
+    return sessionId;
   };
 
-  const handleGenerateCopy = (styleRefImg, myProductImg, promptVal) => {
-    setShowCopyGeneratorModal(false);
-    setView('workspace');
+  const handleGenerateSet = async (productImg, chosenStyleId, selectedTypes) => {
+    if (!productImg) return showError('请先上传商品图');
+    if (!selectedTypes.length) return showError('请至少选择一种套图类型');
+    try {
+      const sessionId = await prepareQuickToolSession({ title: '商品套图', productImg });
+      setShowSetGeneratorModal(false);
+      await handleSendMessage(
+        `基于上传的商品图生成商品套图，视觉风格为 ${chosenStyleId}。`,
+        null,
+        {
+          session_id: sessionId,
+          product_image_base64: productImg,
+          image_types: selectedTypes,
+          product_set_mode: true,
+          style_preference: chosenStyleId,
+          message_images: [{ url: productImg, name: '商品图' }],
+          reset_conversation: true,
+        },
+      );
+    } catch (err) {
+      showError(err.message || '商品套图生成启动失败');
+    }
+  };
+
+  const handleGenerateCopy = async (styleRefImg, myProductImg, promptVal) => {
+    if (!styleRefImg) return showError('请先上传爆款参考图');
+    if (!myProductImg) return showError('请先上传新的商品图');
+    try {
+      const sessionId = await prepareQuickToolSession({ title: '爆款图复刻', productImg: myProductImg, styleRefImg });
+      setShowCopyGeneratorModal(false);
+      await handleSendMessage(
+        promptVal?.trim() || '按照参考图的视觉风格，为新商品生成主图、卖点图和详情图。',
+        null,
+        {
+          session_id: sessionId,
+          product_image_base64: myProductImg,
+          image_types: ['main', 'selling_point', 'detail'],
+          style_reference_images: [styleRefImg],
+          style_transfer_mode: true,
+          message_images: [
+            { url: styleRefImg, name: '爆款参考图' },
+            { url: myProductImg, name: '新商品图' },
+          ],
+          reset_conversation: true,
+        },
+      );
+    } catch (err) {
+      showError(err.message || '爆款图复刻启动失败');
+    }
   };
 
   const handleGenerateAiImg = (productImg, styleId, customPrompt) => {
@@ -872,9 +964,30 @@ function AppInner() {
     setView('workspace');
   };
 
-  const handleGenerateDetailPage = (points, styleVal, aspectVal) => {
-    setShowDetailGeneratorModal(false);
-    setView('workspace');
+  const handleGenerateDetailPage = async (productImg, points, styleVal, aspectVal) => {
+    if (!productImg) return showError('请先上传商品图');
+    if (!points.trim()) return showError('请填写商品品类或卖点');
+    try {
+      const sessionId = await prepareQuickToolSession({ title: 'A+详情页', productImg });
+      setShowDetailGeneratorModal(false);
+      await handleSendMessage(
+        `为商品制作 A+/详情页。商品信息与卖点：${points}`,
+        null,
+        {
+          session_id: sessionId,
+          product_image_base64: productImg,
+          image_types: ['detail'],
+          product_set_mode: true,
+          selling_points: points,
+          style_preference: styleVal,
+          aspect_ratio: aspectVal,
+          message_images: [{ url: productImg, name: '商品图' }],
+          reset_conversation: true,
+        },
+      );
+    } catch (err) {
+      showError(err.message || 'A+/详情页生成启动失败');
+    }
   };
 
   const handleRenderVideo = (img, motion, bg) => {
@@ -1562,7 +1675,12 @@ function AppInner() {
   const handleAttachImageToChat = (imageEl) => {
     setAttachedImages(prev => {
       if (prev.find(img => img.id === imageEl.id)) return prev;
-      return [...prev, { id: imageEl.id, url: imageEl.url, name: imageEl.name || '图片' }];
+      return [...prev, {
+        ...imageEl,
+        id: imageEl.id,
+        url: imageEl.url,
+        name: imageEl.name || '图片',
+      }];
     });
   };
 
@@ -1570,11 +1688,183 @@ function AppInner() {
     setAttachedImages(prev => prev.filter(img => img.id !== id));
   };
 
-  const handleSendMessage = async (text, customMaskData = null, options = {}) => {
-    if (!(await checkAndDeductCredit())) {
+  const handleAddStyleReference = async (file) => {
+    if (!file) return;
+    const base64 = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+    const asset = await addUploadedAsset(file.name, base64, 'style_reference');
+    setAttachedImages(prev => [
+      ...prev.filter(img => img.role !== 'style_reference'),
+      { id: asset.id || `style-${Date.now()}`, name: file.name, url: asset.url || base64, role: 'style_reference' },
+    ]);
+  };
+
+  // ── Product image analysis on canvas drop/import ──
+  const handleImageAddedToCanvas = async (base64Url, fileName, existingMessageId = null) => {
+    if (!base64Url) return;
+
+    // Store the base64 for sending to LLM when user sends a message
+    setCanvasProductImageBase64(base64Url);
+
+    if (productAnalysisInFlightRef.current) {
+      showError('正在分析上一张商品图，请稍候。MVP 暂时只支持单图分析。');
       return;
     }
-    const updatedMessages = [...chatMessages, { sender: 'user', text }];
+    productAnalysisInFlightRef.current = true;
+
+    let activeSessionId;
+    try {
+      activeSessionId = await ensureActiveSession('商品图分析');
+      if (!activeSessionId) {
+        showError('无法创建商品分析会话，请重试。');
+        return;
+      }
+    } catch (err) {
+      showError(err.message || '无法创建商品分析会话，请重试。');
+      productAnalysisInFlightRef.current = false;
+      return;
+    }
+
+    setIsAnalyzingProductImage(true);
+    setProductImageAnalysis(null);
+    setProductAnalysisSource({ base64Url, fileName });
+    const messageId = existingMessageId || `product-analysis-${Date.now()}`;
+    setChatMessages(prev => {
+      const loadingMessage = {
+        id: messageId,
+        sender: 'ai',
+        type: 'product_analysis_loading',
+        text: `正在识别商品图「${fileName || '商品图'}」…`,
+      };
+      const exists = prev.some(message => message.id === messageId);
+      return exists
+        ? prev.map(message => message.id === messageId ? loadingMessage : message)
+        : [...prev, loadingMessage];
+    });
+
+    try {
+      const resp = await fetch('/api/agent/analyze-product-image', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          image_base64: base64Url,
+          file_name: fileName || 'product_image',
+          session_id: activeSessionId,
+        }),
+      });
+
+      if (!resp.ok) {
+        const errorBody = await resp.json().catch(() => ({}));
+        const message = errorBody.error || errorBody.detail || '商品图分析失败';
+        console.error('[App] analyze-product-image failed:', resp.status, message);
+        throw new Error(message);
+      }
+
+      const data = await resp.json();
+      if (data.success && data.analysis) {
+        setProductImageAnalysis(data.analysis);
+        setChatMessages(prev => prev.map(message => message.id === messageId ? {
+          id: messageId,
+          sender: 'ai',
+          type: 'product_analysis',
+          data: data.analysis,
+          confirmed: false,
+          text: `已分析商品图「${fileName || '商品图'}」`,
+        } : message));
+      }
+    } catch (err) {
+      console.error('[App] Image analysis error:', err);
+      setChatMessages(prev => prev.map(message => message.id === messageId ? {
+        id: messageId,
+        sender: 'ai',
+        type: 'product_analysis',
+        data: { error: err.message || '图片分析失败' },
+        confirmed: false,
+      } : message));
+      showError(err.message || '商品图分析失败，请重试。');
+    } finally {
+      productAnalysisInFlightRef.current = false;
+      setIsAnalyzingProductImage(false);
+    }
+  };
+
+  const handleConfirmProductAnalysis = async (analysis, messageId) => {
+    if (!currentSessionId) {
+      showError('当前没有可保存的设计会话。');
+      return;
+    }
+    setIsConfirmingProductAnalysis(true);
+    try {
+      const response = await fetch(`/api/agent/sessions/${currentSessionId}/product-analysis/confirm`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ analysis }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.error || '确认商品信息失败');
+
+      const confirmed = data.analysis;
+      const sellingPointText = confirmed.selling_points.map(point => point.title).join('，');
+      setProductImageAnalysis(confirmed);
+      setProductInfo(prev => ({
+        ...prev,
+        name: confirmed.product.product_name,
+        sellingPoints: sellingPointText,
+      }));
+      setChatMessages(prev => prev.map(message => message.id === messageId ? {
+        ...message,
+        data: confirmed,
+        confirmed: true,
+      } : message));
+      showSuccess('商品信息已确认，后续 Agent 将直接使用这些卖点。');
+    } catch (err) {
+      showError(err.message || '确认商品信息失败');
+    } finally {
+      setIsConfirmingProductAnalysis(false);
+    }
+  };
+
+  const handleRetryProductAnalysis = (messageId) => {
+    if (!productAnalysisSource) {
+      showError('原始商品图不在当前页面中，请重新上传。');
+      return;
+    }
+    handleImageAddedToCanvas(productAnalysisSource.base64Url, productAnalysisSource.fileName, messageId);
+  };
+
+  const handleSendMessage = async (text, customMaskData = null, options = {}) => {
+    if (agentRequestInFlightRef.current || isGenerating) {
+      showError('Agent 正在处理上一条请求，请等待当前生成完成后再发送。');
+      return;
+    }
+    agentRequestInFlightRef.current = true;
+
+    let creditOk = false;
+    try {
+      creditOk = await checkAndDeductCredit();
+    } catch (err) {
+      agentRequestInFlightRef.current = false;
+      showError(err.message || '额度校验失败，请稍后再试');
+      return;
+    }
+    if (!creditOk) {
+      agentRequestInFlightRef.current = false;
+      return;
+    }
+    const updatedMessages = [
+      ...(options.reset_conversation ? [] : chatMessages),
+      {
+        sender: 'user',
+        text,
+        images: options.message_images || attachedImages.map(img => ({ url: img.url, name: img.name || '图片' })),
+      },
+    ];
     setChatMessages(updatedMessages);
     setIsTyping(true);
 
@@ -1593,6 +1883,11 @@ function AppInner() {
       });
       enhancedText = `[系统] 画布框选区域:\n${regionLines.join('\n')}\n\n[用户指令] ${text}`;
     }
+
+    // An image intentionally placed above the composer is a generation/edit
+    // input, not an analysis-only upload. The control marker is stripped by
+    // the image Agent and forces a single image-to-image generation turn.
+    enhancedText = routeMessageForAttachments(enhancedText, attachedImages);
 
     const currentVer = versions[currentVersionIndex];
 
@@ -1664,28 +1959,40 @@ function AppInner() {
       }
 
       // 取第一张附件作为 product_image_base64（保持向后兼容）
-      const attachedBase64 = attachedImageBase64List.length > 0 ? attachedImageBase64List[0] : null;
+      const styleReferenceIndexes = attachedImages
+        .map((image, index) => image.role === 'style_reference' ? index : -1)
+        .filter(index => index >= 0);
+      const attachedStyleReferenceImages = styleReferenceIndexes.map(index => attachedImageBase64List[index]).filter(Boolean);
+      const styleReferenceImages = options.style_reference_images || attachedStyleReferenceImages;
+      const isStyleTransfer = options.style_transfer_mode ?? styleReferenceImages.length > 0;
+      const productAttachmentBase64 = attachedImageBase64List.find((_, index) => !styleReferenceIndexes.includes(index)) || null;
 
       const bodyObj = {
           message: enhancedText,
-          product_name: productInfo.name || '',
-          selling_points: productInfo.sellingPoints || '',
-          product_image_base64: options.product_image_base64 || attachedBase64 || productImage || null,
-          image_types: options.image_types || [],
-          session_id: currentSessionId,
+          product_name: options.product_name || productInfo.name || '',
+          selling_points: options.selling_points || productInfo.sellingPoints || '',
+          product_image_base64: options.product_image_base64 || productAttachmentBase64 || canvasProductImageBase64 || productImage || null,
+          image_types: options.image_types || (isStyleTransfer ? ['main', 'selling_point', 'detail'] : []),
+          session_id: options.session_id || currentSessionId,
           mask_data: inpaintMaskData || null,
           canvas_snapshot: infiniteCanvasRef.current?.getCanvasSnapshot?.() || null,
           stitch_regions: stitchRegions,
           current_images: canvasImageMap,
-          reference_images: attachedImageBase64List,
-          style_preference: productInfo.styleId || '',
-          aspect_ratio: aspect,
+          reference_images: attachedImageBase64List.length > 0 ? attachedImageBase64List : (canvasProductImageBase64 ? [canvasProductImageBase64] : []),
+          style_reference_images: styleReferenceImages,
+          style_transfer_mode: isStyleTransfer,
+          product_set_mode: options.product_set_mode || false,
+          style_preference: options.style_preference || productInfo.styleId || '',
+          aspect_ratio: options.aspect_ratio || aspect,
           skip_info_collection: options.skip_info_collection || false,
           skip_design_planning: options.skip_design_planning || false,
           single_image_mode: options.single_image_mode || false,
           target_single_type: options.target_single_type || '',
           refinement_mode: options.refinement_mode || false,
-          agent_memory: options.agent_memory || {},
+          agent_memory: {
+            ...(options.agent_memory || {}),
+            ...(productImageAnalysis ? { _product_analysis: productImageAnalysis } : {}),
+          },
         };
         const sseResponse = await fetch('/api/agent/chat-stream', {
         method: 'POST',
@@ -1716,7 +2023,10 @@ function AppInner() {
           setIsGenerating(false);
           return;
         }
-        throw new Error(errData.error || errData.message || 'Agent 服务响应异常');
+        const error = new Error(errData.error || errData.message || 'Agent 服务响应异常');
+        error.status = sseResponse.status;
+        error.code = errData.code;
+        throw error;
       }
 
       const reader = sseResponse.body.getReader();
@@ -1739,6 +2049,7 @@ function AppInner() {
             switch (event.event) {
               case 'agent_message':
                 // Agent-controlled chat message — display directly
+                if (!String(event.text || '').trim()) break;
                 setChatMessages(prev => [...prev, {
                   sender: 'ai',
                   agent: event.agent || 'coordinator',
@@ -1798,7 +2109,7 @@ function AppInner() {
                   const imgLabel = IMAGE_TYPE_LABELS?.[imgType]
                     ? `${IMAGE_TYPE_LABELS[imgType].name}`
                     : `${imgType}`;
-                  infiniteCanvasRef.current?.insertImageLayer(event.url, imgLabel);
+                  infiniteCanvasRef.current?.insertImageLayer(event.url, imgLabel, null, { source: 'ai_generated', imageType: imgType });
                 }
                 break;
 
@@ -1820,7 +2131,7 @@ function AppInner() {
                     if (!canvasUrls.has(imgUrl)) {
                       const cfg = IMAGE_TYPE_LABELS?.[imgType];
                       const label = cfg ? cfg.name : imgType;
-                      infiniteCanvasRef.current?.insertImageLayer(imgUrl, `${label}（已生成）`);
+                      infiniteCanvasRef.current?.insertImageLayer(imgUrl, `${label}（已生成）`, null, { source: 'ai_generated', imageType: imgType });
                     }
                   });
                   // 不在这里保存 canvas state —— 等 images_saved 事件用本地 URL 替换后再保存
@@ -1847,7 +2158,22 @@ function AppInner() {
                   }, 2000);
                 }
                 if (event.remainingCredits != null) {
-                  setCurrentUser(prev => ({ ...prev, remainingCredits: event.remainingCredits }));
+                  authUpdateUser({
+                    ...currentUser,
+                    remainingCredits: event.remainingCredits,
+                  });
+                }
+                break;
+
+              case 'clarification_needed':
+                // Agent needs user input before proceeding
+                if (event.questions?.length > 0) {
+                  setChatMessages(prev => [...prev, {
+                    sender: 'ai',
+                    agent: event.agent || 'requirement_collector',
+                    text: '在生成之前，我想确认：\n' + event.questions.map((q, i) => `${i + 1}. ${q}`).join('\n'),
+                    isClarification: true,
+                  }]);
                 }
                 break;
 
@@ -2025,8 +2351,15 @@ function AppInner() {
         });
       }
     } catch (err) {
-      showError(`Agent 创意引擎响应异常: ${err.message}`);
+      if (err.code === 'AGENT_REQUEST_IN_PROGRESS' || err.status === 409) {
+        showError('Agent 正在处理上一条请求，请等待当前生成完成后再发送。');
+      } else if (err.code === 'AGENT_RATE_LIMITED' || err.status === 429 || /请求过于频繁|rate limit|too many/i.test(err.message || '')) {
+        showError('Agent 请求太密集，系统已启用保护。请等待当前任务完成后再试。');
+      } else {
+        showError(`Agent 创意引擎响应异常: ${err.message}`);
+      }
     } finally {
+      agentRequestInFlightRef.current = false;
       setIsGenerating(false);
       setIsTyping(false);
     }
@@ -2119,12 +2452,12 @@ function AppInner() {
     };
     const insert = () => {
       if (infiniteCanvasRef.current?.insertImageLayer) {
-        infiniteCanvasRef.current.insertImageLayer(url, name, onError);
+        infiniteCanvasRef.current.insertImageLayer(url, name, onError, { source: item.source || 'user_uploaded' });
         showSuccess(`素材 "${name}" 已添加到画布`);
       } else {
         setTimeout(() => {
           if (infiniteCanvasRef.current?.insertImageLayer) {
-            infiniteCanvasRef.current.insertImageLayer(url, name, onError);
+            infiniteCanvasRef.current.insertImageLayer(url, name, onError, { source: item.source || 'user_uploaded' });
             showSuccess(`素材 "${name}" 已添加到画布`);
           } else {
             showError('画布尚未就绪，请稍后再试');
@@ -2250,13 +2583,12 @@ function AppInner() {
     if (currentUser) {
       try {
         // Auto-create session on first upload if none exists
-        let activeSessionId = currentSessionId;
+        let activeSessionId = activeSessionIdRef.current;
         if (!activeSessionId) {
           try {
-            const newId = await createSession('新设计会话');
+            const newId = await ensureActiveSession('新设计会话');
             if (newId) {
               activeSessionId = newId;
-              setCurrentSessionId(newId);
             }
           } catch (err) {
             console.warn('Auto-create session on upload failed:', err);
@@ -2272,7 +2604,8 @@ function AppInner() {
             uid: currentUser.uid,
             name: fileName || `upload_${Date.now()}.png`,
             data: base64Url,
-            session_id: activeSessionId || null
+            session_id: activeSessionId || null,
+            metrics: { asset_role: type === 'style_reference' ? 'style_reference' : 'product' }
           }),
           credentials: 'include'
         });
@@ -2281,6 +2614,7 @@ function AppInner() {
           setUploadedAssets(prev => prev.map(a => a.id === tempId ? data.asset : a));
           return data.asset;
         }
+        throw new Error(data.error || data.detail || `同步请求失败（${response.status}）`);
       } catch (err) {
         showError(`素材云端同步失败: ${err.message}`);
       }
@@ -2745,7 +3079,25 @@ function AppInner() {
             )}
 
             {/* User Profile Area */}
-            {currentUser ? (
+            {isAuthLoading && !currentUser ? (
+                <button
+                  className="topbar-login-btn"
+                  disabled
+                  aria-label="正在恢复登录状态"
+                  style={{
+                    background: 'var(--surface-container-high)',
+                    color: 'var(--text-secondary)',
+                    border: '1px solid var(--outline-variant)',
+                    borderRadius: 'var(--radius-default)',
+                    padding: '6px 14px',
+                    fontSize: '0.75rem',
+                    fontWeight: 600,
+                    cursor: 'wait'
+                  }}
+                >
+                  账号加载中…
+                </button>
+              ) : currentUser ? (
                 <div
                   className="user-profile-wrapper"
                   onClick={(e) => { e.stopPropagation(); setShowUserDropdown(!showUserDropdown); }}
@@ -2849,6 +3201,7 @@ function AppInner() {
                 onQuickToolClick={handleQuickToolClick}
                 onDirectAgentStart={handleDirectAgentStart}
                 onImageUploaded={addUploadedAsset}
+                onProductImageSelected={handleImageAddedToCanvas}
                 onOpenPricing={() => setShowPaymentModal(true)}
               />
             } />
@@ -2858,6 +3211,7 @@ function AppInner() {
                 onQuickToolClick={handleQuickToolClick}
                 onDirectAgentStart={handleDirectAgentStart}
                 onImageUploaded={addUploadedAsset}
+                onProductImageSelected={handleImageAddedToCanvas}
                 onOpenPricing={() => setShowPaymentModal(true)}
               />
             } />
@@ -2911,6 +3265,12 @@ function AppInner() {
                   onAttachImageToChat={handleAttachImageToChat}
                   attachedImages={attachedImages}
                   onRemoveAttachedImage={handleRemoveAttachedImage}
+                  onAddStyleReference={handleAddStyleReference}
+                  onImageAdded={handleImageAddedToCanvas}
+                  onConfirmProductAnalysis={handleConfirmProductAnalysis}
+                  onRetryProductAnalysis={handleRetryProductAnalysis}
+                  isAnalyzingProductImage={isAnalyzingProductImage}
+                  isConfirmingProductAnalysis={isConfirmingProductAnalysis}
                 />
 
                 {currentVersion && showDashboard && (
@@ -2989,6 +3349,31 @@ function AppInner() {
             </div>
             <div className="settings-modal-body">
               <div>
+                <label className="settings-label">上传商品图</label>
+                <div
+                  onClick={() => {
+                    const inp = document.createElement('input');
+                    inp.type = 'file';
+                    inp.accept = 'image/*';
+                    inp.onchange = (e) => {
+                      const file = e.target.files[0];
+                      if (!file) return;
+                      const reader = new FileReader();
+                      reader.onload = (re) => setDetailUploadBase64(re.target.result);
+                      reader.readAsDataURL(file);
+                    };
+                    inp.click();
+                  }}
+                  style={{ border: '1px dashed var(--outline-variant)', borderRadius: '12px', padding: '18px', textAlign: 'center', cursor: 'pointer', background: 'var(--surface-container-low)' }}
+                >
+                  {detailUploadBase64 ? (
+                    <img src={detailUploadBase64} style={{ width: '88px', height: '88px', objectFit: 'cover', borderRadius: '8px' }} alt="商品图预览" />
+                  ) : (
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>点击上传商品实拍图</div>
+                  )}
+                </div>
+              </div>
+              <div>
                 <label className="settings-label">商品品类 & 卖点描述</label>
                 <textarea
                   className="settings-input"
@@ -3010,8 +3395,7 @@ function AppInner() {
               <div>
                 <label className="settings-label">版面尺寸规格</label>
                 <select className="settings-select" id="detail-aspect">
-                  <option value="detail">2:3 详情页纵向版 (320 x 480)</option>
-                  <option value="1:1">1:1 主图首图版 (380 x 380)</option>
+                  <option value="3:4">3:4 A+/详情页纵向版 (1440 x 1920)</option>
                 </select>
               </div>
             </div>
@@ -3022,9 +3406,8 @@ function AppInner() {
                 onClick={() => {
                   const points = document.getElementById('detail-points')?.value || '详情页';
                   const styleVal = document.getElementById('detail-style')?.value || 'french_vintage';
-                  const aspectVal = document.getElementById('detail-aspect')?.value || 'detail';
-                  setShowDetailGeneratorModal(false);
-                  handleGenerateDetailPage(points, styleVal, aspectVal);
+                  const aspectVal = document.getElementById('detail-aspect')?.value || '3:4';
+                  handleGenerateDetailPage(detailUploadBase64, points, styleVal, aspectVal);
                 }}
               >
                 立即智能排版生成
@@ -3226,13 +3609,12 @@ function AppInner() {
               </div>
 
               <div>
-                <label className="settings-label" style={{ marginBottom: '6px', display: 'block' }}>选择生成的尺寸比例 (支持多选)</label>
+                <label className="settings-label" style={{ marginBottom: '6px', display: 'block' }}>选择套图内容 (支持多选)</label>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
                   {[
-                    { id: '1:1', name: '天猫/淘宝主图 (380x380)' },
-                    { id: '9:16', name: '抖音/小红书封面 (320x568)' },
-                    { id: '16:9', name: '京东宽幅 Banner (600x337)' },
-                    { id: '3:4', name: '拼多多主图 (360x480)' }
+                    { id: 'main', name: '电商主图' },
+                    { id: 'selling_point', name: '卖点图' },
+                    { id: 'detail', name: '详情页图' }
                   ].map((size) => (
                     <label key={size.id} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.75rem', color: 'var(--on-surface)', cursor: 'pointer' }}>
                       <input 
@@ -3258,7 +3640,6 @@ function AppInner() {
               <button 
                 className="settings-btn save" 
                 onClick={() => {
-                  setShowSetGeneratorModal(false);
                   handleGenerateSet(setUploadBase64, chosenSetStyle, selectedSetSizes);
                 }}
               >
@@ -3388,7 +3769,6 @@ function AppInner() {
               <button 
                 className="settings-btn save" 
                 onClick={() => {
-                  setShowCopyGeneratorModal(false);
                   handleGenerateCopy(copyUploadBase64, copyProductBase64, copyStylePrompt);
                 }}
               >

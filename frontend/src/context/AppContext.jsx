@@ -19,6 +19,8 @@ export const AppProvider = ({ children }) => {
   const auth = useAuth();
   // token is always null in Better Auth (cookie-based), kept for backwards compat
   const token = auth ? auth.token : null;
+  const isAuthenticated = auth?.isAuthenticated || false;
+  const isAuthLoading = auth?.isAuthLoading || false;
 
   const getViewFromPath = useCallback((pathname) => {
     // In HashRouter, pathname is the hash path (e.g. /history, /workspace)
@@ -141,23 +143,32 @@ export const AppProvider = ({ children }) => {
 
   const fetchSessions = useCallback(async (authToken) => {
     // authToken parameter kept for backwards compatibility — no longer needed
-    if (!token && !authToken) return;
+    if (!isAuthenticated && !authToken) return;
     try {
       const response = await fetch('/api/agent/sessions', {
         credentials: 'include'
       });
       const data = await response.json();
       if (response.ok && data.success) {
-        setSessions(data.sessions || []);
+        const loadedSessions = data.sessions || [];
+        setSessions(loadedSessions);
+        setCurrentSessionId(previousId => {
+          const nextId = loadedSessions.some(session => session.session_id === previousId)
+            ? previousId
+            : (loadedSessions[0]?.session_id || '');
+          if (nextId) localStorage.setItem('current_session_id', nextId);
+          else localStorage.removeItem('current_session_id');
+          return nextId;
+        });
       }
     } catch (e) {
       console.warn('Failed to fetch chat sessions:', e);
     }
-  }, []);
+  }, [isAuthenticated]);
 
   const selectSession = useCallback(async (sessionId, authToken) => {
     // authToken parameter kept for backwards compatibility — session cookie handles auth
-    if (!sessionId) return;
+    if (!sessionId || (!isAuthenticated && !authToken)) return;
     try {
       const response = await fetch(`/api/agent/sessions/${sessionId}`, {
         credentials: 'include'
@@ -175,6 +186,26 @@ export const AppProvider = ({ children }) => {
             return { sender: 'ai', agent: 'coordinator', text: msg.content };
           }
         });
+
+        const confirmedAnalysis = data.session.product_analysis_confirmed;
+        const draftAnalysis = data.session.product_analysis_draft;
+        if (confirmedAnalysis && Object.keys(confirmedAnalysis).length > 0) {
+          mappedMessages.push({
+            id: `product-analysis-${sessionId}`,
+            sender: 'ai',
+            type: 'product_analysis',
+            data: confirmedAnalysis,
+            confirmed: true,
+          });
+        } else if (draftAnalysis && Object.keys(draftAnalysis).length > 0) {
+          mappedMessages.push({
+            id: `product-analysis-${sessionId}`,
+            sender: 'ai',
+            type: 'product_analysis',
+            data: draftAnalysis,
+            confirmed: false,
+          });
+        }
         
         if (mappedMessages.length === 0) {
           mappedMessages.push({
@@ -201,7 +232,7 @@ export const AppProvider = ({ children }) => {
     } catch (e) {
       showError(`加载会话失败: ${e.message}`);
     }
-  }, [setChatMessages, setProductInfo, showError]);
+  }, [isAuthenticated, setChatMessages, setProductInfo, showError]);
 
   const createSession = useCallback(async (title = '新设计会话', authToken) => {
     // authToken parameter kept for backwards compatibility
@@ -305,6 +336,16 @@ export const AppProvider = ({ children }) => {
   useEffect(() => {
     fetchSessions();
   }, [fetchSessions]);
+
+  useEffect(() => {
+    if (!isAuthLoading && !isAuthenticated) {
+      setSessions([]);
+      setCurrentSessionId('');
+      setChatMessages([]);
+      setCurrentCanvasState(null);
+      localStorage.removeItem('current_session_id');
+    }
+  }, [isAuthLoading, isAuthenticated]);
 
   useEffect(() => {
     if (currentSessionId && chatMessages.length === 0) {

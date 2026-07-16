@@ -7,7 +7,7 @@ import {
   Crown
 } from 'lucide-react';
 
-export default function Portal({ onStartOnboarding, onQuickToolClick, onDirectAgentStart, onImageUploaded, onOpenPricing }) {
+export default function Portal({ onStartOnboarding, onQuickToolClick, onDirectAgentStart, onImageUploaded, onProductImageSelected, onOpenPricing }) {
   const [carouselIndex, setCarouselIndex] = useState(0);
 
 
@@ -49,6 +49,9 @@ export default function Portal({ onStartOnboarding, onQuickToolClick, onDirectAg
         reader.onload = (re) => resolve(re.target.result);
         reader.readAsDataURL(file);
       });
+      if (onProductImageSelected) {
+        onProductImageSelected(base64Url, file.name);
+      }
       let urlToUse = base64Url;
       if (onImageUploaded) {
         try {

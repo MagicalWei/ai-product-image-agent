@@ -382,7 +382,10 @@ const CanvasPanel = forwardRef(({
   
 
   // Brush mask states
-  const maskCanvasRef = useRef(null);
+  const [maskCanvas] = useState(() => (
+    typeof document !== 'undefined' ? document.createElement('canvas') : null
+  ));
+  const maskCanvasRef = useRef(maskCanvas);
   const lastPosRef = useRef({ x: 0, y: 0 });
   const [isDrawing, setIsDrawing] = useState(false);
   const [brushSize, setBrushSize] = useState(24);
@@ -470,7 +473,7 @@ const CanvasPanel = forwardRef(({
     }
   };
 
-  const clearMask = () => {
+  function clearMask() {
     if (maskCanvasRef.current) {
       const canvas = maskCanvasRef.current;
       const ctx = canvas.getContext('2d');
@@ -480,7 +483,7 @@ const CanvasPanel = forwardRef(({
         konvaImageRef.current.getLayer()?.batchDraw();
       }
     }
-  };
+  }
 
   const handleDeleteAnnotation = (id) => {
     const updated = annotations.filter(ann => ann.id !== id);
@@ -1033,7 +1036,7 @@ const CanvasPanel = forwardRef(({
 
               {/* 3. Mask overlay drawing */}
               <Image
-                image={maskCanvasRef.current}
+                image={maskCanvas}
                 x={workspaceMode === 'cowork' ? bgPos.x : 16}
                 y={workspaceMode === 'cowork' ? bgPos.y : 16}
                 width={imageWidth}
