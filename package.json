@@ -6,7 +6,8 @@
   "scripts": {
     "dev:frontend": "cd frontend && pnpm dev",
     "dev:backend": "cd backend && node server.js",
-    "dev": "concurrently \"pnpm dev:frontend\" \"pnpm dev:backend\"",
+    "dev:agent": "cd backend/agent_service && python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload",
+    "dev": "concurrently --kill-others-on-fail \"pnpm dev:frontend\" \"pnpm dev:backend\" \"pnpm dev:agent\"",
     "build": "cd frontend && pnpm build",
     "test": "vitest --config tests/vitest.config.js",
     "test:e2e": "playwright test --config tests/playwright.config.js"

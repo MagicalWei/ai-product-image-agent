@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import Sidebar from '../../frontend/src/components/Sidebar';
 import LayersOutlinePanel from '../../frontend/src/components/LayersOutlinePanel';
+import ProductAnalysisCard from '../../frontend/src/components/ProductAnalysisCard';
+import Portal from '../../frontend/src/components/Portal';
 
 describe('Sidebar Component', () => {
   const defaultProps = {
@@ -84,5 +86,65 @@ describe('LayersOutlinePanel Component', () => {
     fireEvent.click(header);
     
     expect(screen.queryByText('背景图层')).toBeNull();
+  });
+});
+
+describe('ProductAnalysisCard MVP', () => {
+  const analysis = {
+    schema_version: '1.0',
+    status: 'draft',
+    product: { product_name: '便携榨汁杯', product_category: '小家电', confidence: 0.9 },
+    visible_facts: ['透明杯体', '杯型一体化结构'],
+    selling_points: [
+      { title: '便携设计', description: '杯型结构', visual_evidence: '紧凑杯身', confidence: 0.8, verification: 'confirmed_visual' },
+      { title: '方便观察', description: '透明杯体', visual_evidence: '杯体透明可见', confidence: 0.9, verification: 'confirmed_visual' },
+      { title: '一体化使用', description: '底座与杯身连接', visual_evidence: '底部集成结构', confidence: 0.7, verification: 'likely_visual' },
+    ],
+    uncertain_claims: ['无法判断电池容量'],
+    image_quality: { subject_complete: true, clarity: 'good', issues: [] },
+  };
+
+  it('does not promote analysis until the user confirms selected selling points', async () => {
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    render(<ProductAnalysisCard analysis={analysis} onConfirm={onConfirm} />);
+
+    expect(screen.getByText(/确认前，这些内容不会进入 Agent 记忆/)).toBeDefined();
+    fireEvent.click(screen.getAllByLabelText('取消该卖点')[0]);
+    fireEvent.click(screen.getByRole('button', { name: /确认商品信息（2 条卖点）/ }));
+
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    expect(onConfirm.mock.calls[0][0].status).toBe('confirmed');
+    expect(onConfirm.mock.calls[0][0].selling_points).toHaveLength(2);
+  });
+});
+
+describe('Portal product upload', () => {
+  it('starts product analysis before cloud synchronization finishes', async () => {
+    let finishUpload;
+    const onImageUploaded = vi.fn(() => new Promise((resolve) => {
+      finishUpload = resolve;
+    }));
+    const onProductImageSelected = vi.fn();
+    const onStartOnboarding = vi.fn();
+    const { container } = render(
+      <Portal
+        onStartOnboarding={onStartOnboarding}
+        onQuickToolClick={vi.fn()}
+        onDirectAgentStart={vi.fn()}
+        onImageUploaded={onImageUploaded}
+        onProductImageSelected={onProductImageSelected}
+        onOpenPricing={vi.fn()}
+      />
+    );
+
+    const input = container.querySelector('input[type="file"][accept="image/*"]');
+    const file = new File(['product'], 'product.png', { type: 'image/png' });
+    fireEvent.change(input, { target: { files: [file] } });
+
+    await waitFor(() => expect(onProductImageSelected).toHaveBeenCalledTimes(1));
+    expect(onStartOnboarding).not.toHaveBeenCalled();
+
+    finishUpload({ id: 'asset-1', url: '/uploads/product.png' });
+    await waitFor(() => expect(onStartOnboarding).toHaveBeenCalledTimes(1));
   });
 });

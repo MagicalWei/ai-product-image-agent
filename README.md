@@ -163,7 +163,7 @@ DEEPSEEK_CHAT_MODEL=deepseek-chat
 
 # AI 生图模型（豆包 Seedream）
 DOUBAO_API_KEY=ark-xxx
-DOUBAO_IMAGE_MODEL=doubao-seedream-5-0-260128
+DOUBAO_IMAGE_MODEL=doubao-seedream-5-0-lite-260128
 
 # AI 服务地址
 AI_SERVICE_URL=http://localhost:8000

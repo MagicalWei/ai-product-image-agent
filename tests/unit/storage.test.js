@@ -87,7 +87,7 @@ describe('LocalStorage', () => {
     const savedPath = path.join(uploadsDir, filename);
     expect(fs.existsSync(savedPath)).toBe(true);
     expect(fs.readFileSync(savedPath, 'utf8')).toBe('Hello, World!');
-    expect(result).toBe(`uploads/${filename}`);
+    expect(result).toBe(`/uploads/${filename}`);
   });
 
   it('should return a relative URL path for saved files', async () => {
@@ -97,7 +97,7 @@ describe('LocalStorage', () => {
     const url = await storage.saveFile(buffer, filename);
 
     expect(typeof url).toBe('string');
-    expect(url).toBe('uploads/image.png');
+    expect(url).toBe('/uploads/image.png');
   });
 
   it('should delete a file from disk', async () => {
@@ -119,7 +119,7 @@ describe('LocalStorage', () => {
   it('should return a relative file URL', async () => {
     const url = await storage.getFileUrl('test.png');
     expect(typeof url).toBe('string');
-    expect(url).toBe('uploads/test.png');
+    expect(url).toBe('/uploads/test.png');
   });
 
   it('should read a file buffer from the uploads directory', async () => {

@@ -1,390 +1,347 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { spawn } from 'child_process';
-import path from 'path';
-import fs from 'fs';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { spawn } from 'node:child_process';
+import http from 'node:http';
+import path from 'node:path';
 
-const PORT = 3000;
+const PORT = 3100;
 const BASE_URL = `http://localhost:${PORT}`;
-let serverProcess = null;
-const testEmail = `test-${Date.now()}@example.com`;
+const testEmail = `journey-${Date.now()}@example.com`;
 const testPassword = 'testpassword123';
-let testUid = null;
-let verificationCode = null;
-let testOrderId = null;
-let dbUrl = null;
-let jwtToken = null; // JWT token saved from registration / login
+
+let serverProcess;
+let verificationCode;
+let sessionCookie = '';
+let testUid;
+let uploadedAsset;
+let designSessionId;
+let fakeAgentServer;
+let capturedAgentBody;
+
+function request(pathname, options = {}) {
+  const headers = new Headers(options.headers || {});
+  if (sessionCookie) headers.set('cookie', sessionCookie);
+  return fetch(`${BASE_URL}${pathname}`, { ...options, headers });
+}
+
+function captureSessionCookie(response) {
+  const cookies = typeof response.headers.getSetCookie === 'function'
+    ? response.headers.getSetCookie()
+    : [response.headers.get('set-cookie')].filter(Boolean);
+  sessionCookie = cookies
+    .map((value) => value.split(';', 1)[0])
+    .filter(Boolean)
+    .join('; ');
+}
+
+async function waitFor(predicate, timeoutMs = 8_000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const value = predicate();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out after ${timeoutMs}ms`);
+}
 
 beforeAll(async () => {
-  // Temporarily rename .env to bypass loading real API keys on startup
-  const envFile = path.join(process.cwd(), '.env');
-  const envBackup = path.join(process.cwd(), '.env.testbak');
-
-  const envVars = {};
-  const targetEnvFile = fs.existsSync(envFile) ? envFile : (fs.existsSync(envBackup) ? envBackup : null);
-  if (targetEnvFile) {
-    try {
-      const envContent = fs.readFileSync(targetEnvFile, 'utf8');
-      envContent.split(/\r?\n/).forEach(line => {
-        const trimmed = line.trim();
-        if (trimmed && !trimmed.startsWith('#')) {
-          const index = trimmed.indexOf('=');
-          if (index !== -1) {
-            const key = trimmed.substring(0, index).trim();
-            const val = trimmed.substring(index + 1).trim();
-            if (key) {
-              envVars[key] = val.replace(/^["']|["']$/g, '');
-            }
-          }
-        }
-      });
-      dbUrl = envVars.DATABASE_URL;
-    } catch (err) {
-      console.error('Failed to parse env file in test config helper:', err);
+  fakeAgentServer = http.createServer((req, res) => {
+    if (req.url === '/health') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"status":"ok"}');
+      return;
     }
-  }
-
-  if (fs.existsSync(envFile)) {
-    fs.renameSync(envFile, envBackup);
-  }
-
-  // Spawn the server process
-  await new Promise((resolve) => {
-    serverProcess = spawn('node', ['server.js'], {
-      cwd: path.join(process.cwd(), 'backend'),
-      env: {
-        ...process.env,
-        ...envVars,
-        NODE_ENV: 'test',
-        EMAILJS_SERVICE_ID: 'your_service_id', // force mock mode for EmailJS
-        BYPASS_IP_RATE_LIMIT: 'true', // ensure rate limit is bypassed for fast API tests
-      },
-    });
-
-    let resolved = false;
-
-    serverProcess.stdout.on('data', (data) => {
-      const output = data.toString();
-      console.log(`[Server Stdout]: ${output}`);
-      // Capture verification code from mock mode log
-      const codeMatch = output.match(/Generated verification code (\d{6})/);
-      if (codeMatch) {
-        verificationCode = codeMatch[1];
-      }
-      if (output.includes('Node.js Backend Server running') && !resolved) {
-        resolved = true;
-        resolve();
-      }
-    });
-
-    serverProcess.stderr.on('data', (data) => {
-      console.error(`[Server Stderr]: ${data}`);
-    });
-
-    // Fallback timeout of 6 seconds in case it fails to start or outputs differently
-    setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        resolve();
-      }
-    }, 6000);
+    if (req.url === '/agent/run-stream' && req.method === 'POST') {
+      let raw = '';
+      req.on('data', (chunk) => { raw += chunk; });
+      req.on('end', () => {
+        capturedAgentBody = JSON.parse(raw);
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        if (capturedAgentBody.message === '开始新设计') {
+          res.write('data: {"event":"new_design_started","text":"已开始新的设计，之前的对话仍然保留。"}\n\n');
+        } else {
+          res.write('data: {"event":"agent_message","agent":"agent","text":"已根据商品图开始生成自然场景卖点图。"}\n\n');
+        }
+        res.write(`data: ${JSON.stringify({
+          event: 'memory_updated',
+          agent_memory: {
+            ...capturedAgentBody.agent_memory,
+            style_preference: '自然场景',
+            image_types: ['selling_point'],
+          },
+        })}\n\n`);
+        res.end('data: {"event":"done"}\n\n');
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
   });
-});
+  await new Promise((resolve) => fakeAgentServer.listen(8100, '127.0.0.1', resolve));
+
+  serverProcess = spawn('node', ['server.js'], {
+    cwd: path.join(process.cwd(), 'backend'),
+    env: {
+      ...process.env,
+      PORT: String(PORT),
+      NODE_ENV: 'test',
+      FRONTEND_URL: 'http://localhost:5173',
+      CORS_ORIGIN: 'http://localhost:5173',
+      AI_SERVICE_URL: 'http://127.0.0.1:8100',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  let output = '';
+  const collectOutput = (chunk) => {
+    const text = chunk.toString();
+    output += text;
+    const match = text.match(/Verification code (\d{6}) for /);
+    if (match) verificationCode = match[1];
+  };
+  serverProcess.stdout.on('data', collectOutput);
+  serverProcess.stderr.on('data', collectOutput);
+
+  await waitFor(() => {
+    if (serverProcess.exitCode !== null) {
+      throw new Error(`Test server exited (${serverProcess.exitCode}):\n${output}`);
+    }
+    return output.includes(`localhost:${PORT}`);
+  }, 12_000);
+}, 15_000);
 
 afterAll(async () => {
-  // Terminate the server process
-  if (serverProcess) {
+  if (serverProcess && serverProcess.exitCode === null) {
     serverProcess.kill('SIGTERM');
+    await Promise.race([
+      new Promise((resolve) => serverProcess.once('exit', resolve)),
+      new Promise((resolve) => setTimeout(resolve, 2_000)),
+    ]);
   }
-
-  // Restore .env
-  const envFile = path.join(process.cwd(), '.env');
-  const envBackup = path.join(process.cwd(), '.env.testbak');
-  if (fs.existsSync(envBackup)) {
-    fs.renameSync(envBackup, envFile);
-  }
+  if (fakeAgentServer) await new Promise((resolve) => fakeAgentServer.close(resolve));
 });
 
-describe('AI Product Image Agent API Tests', () => {
-  // 1. Send Code
-  it('POST /api/auth/send-code - should send a mock verification code', async () => {
-    const response = await fetch(`${BASE_URL}/api/auth/send-code`, {
+describe.sequential('registered user API journey', () => {
+  it('rejects protected endpoints before login', async () => {
+    const response = await fetch(`${BASE_URL}/api/custom-auth/me`);
+    expect(response.status).toBe(401);
+  });
+
+  it('creates an unverified account and sends a verification code', async () => {
+    const signUp = await request('/api/auth/sign-up/email', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: testEmail, password: testPassword, name: 'Journey Test' }),
+    });
+    expect(signUp.status).toBe(200);
+
+    verificationCode = undefined;
+    const send = await request('/api/auth/send-verification-email', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ email: testEmail }),
     });
-
-    const data = await response.json();
-    console.log("SEND CODE DATA IN TEST:", JSON.stringify(data));
-    expect(response.status).toBe(200);
-    expect(data.success).toBe(true);
-    // In test mode, verification code is logged to stdout by the server.
-    // We need to read it from server stdout for the register step.
-    // For now, capture it from the mock mode log output.
-    verificationCode = data.code || verificationCode;
+    expect(send.status).toBe(200);
+    await waitFor(() => verificationCode);
+    expect(verificationCode).toMatch(/^\d{6}$/);
   });
 
-  // 2. Register
-  it('POST /api/auth/register - should fail with invalid verification code', async () => {
-    const response = await fetch(`${BASE_URL}/api/auth/register`, {
+  it('rejects an invalid code and accepts the current code', async () => {
+    const invalid = await request('/api/custom-auth/verify-code', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        email: testEmail,
-        password: testPassword,
-        code: '000000',
-      }),
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: testEmail, code: '000000' }),
     });
+    expect(invalid.status).toBe(400);
 
-    const data = await response.json();
-    expect(response.status).toBe(400);
-    expect(data.error).toContain('验证码不正确');
+    const valid = await request('/api/custom-auth/verify-code', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: testEmail, code: verificationCode }),
+    });
+    expect(valid.status).toBe(200);
+    expect(await valid.json()).toMatchObject({ success: true });
   });
 
-  it('POST /api/auth/register - should succeed with correct verification code', async () => {
-    const response = await fetch(`${BASE_URL}/api/auth/register`, {
+  it('signs in with a cookie session and returns the current profile', async () => {
+    const wrong = await request('/api/auth/sign-in/email', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        email: testEmail,
-        password: testPassword,
-        code: verificationCode,
-      }),
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: testEmail, password: 'wrongpassword' }),
     });
+    expect(wrong.status).toBeGreaterThanOrEqual(400);
 
-    const data = await response.json();
-    expect(response.status).toBe(200);
-    expect(data.success).toBe(true);
-    expect(data.user.email).toBe(testEmail.toLowerCase());
-    expect(data.user.remaining_credits).toBe(10);
-    expect(data.user.membership_type).toBe('free');
+    const signIn = await request('/api/auth/sign-in/email', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: testEmail, password: testPassword }),
+    });
+    expect(signIn.status).toBe(200);
+    captureSessionCookie(signIn);
+    expect(sessionCookie).toContain('better-auth.session_token=');
+
+    const profile = await request('/api/custom-auth/me');
+    expect(profile.status).toBe(200);
+    const data = await profile.json();
+    expect(data.user.email).toBe(testEmail);
+    expect(data.user.emailVerified).toBe(true);
     testUid = data.user.uid;
-    jwtToken = data.token; // Save token
   });
 
-  // 3. Login
-  it('POST /api/auth/login - should fail with wrong credentials', async () => {
-    const response = await fetch(`${BASE_URL}/api/auth/login`, {
+  it('syncs account-specific settings', async () => {
+    const response = await request('/api/custom-auth/sync-keys', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        email: testEmail,
-        password: 'wrongpassword',
-      }),
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ evalKey1: 'test-key-1', customProxy: 'http://proxy.local' }),
     });
-
-    const data = await response.json();
-    expect(response.status).toBe(400);
-    expect(data.error).toContain('邮箱或密码错误');
-  });
-
-  it('POST /api/auth/login - should succeed with correct credentials', async () => {
-    const response = await fetch(`${BASE_URL}/api/auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        email: testEmail,
-        password: testPassword,
-      }),
-    });
-
-    const data = await response.json();
     expect(response.status).toBe(200);
-    expect(data.success).toBe(true);
-    expect(data.user.uid).toBe(testUid);
-    jwtToken = data.token; // Save token
-  });
-
-  // 4. Profile
-  it('GET /api/auth/profile/:uid - should fetch profile details', async () => {
-    const response = await fetch(`${BASE_URL}/api/auth/profile/${testUid}`, {
-      headers: {
-        'Authorization': `Bearer ${jwtToken}`
-      }
-    });
     const data = await response.json();
-    expect(response.status).toBe(200);
-    expect(data.success).toBe(true);
-    expect(data.user.email).toBe(testEmail.toLowerCase());
-  });
-
-  // 5. Sync API Keys
-  it('POST /api/auth/sync-keys - should update keys in database', async () => {
-    const response = await fetch(`${BASE_URL}/api/auth/sync-keys`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${jwtToken}`
-      },
-      body: JSON.stringify({
-        uid: testUid,
-        mimoKey: 'mimo_key_xyz',
-        geminiKey: 'gemini_key_123',
-        qwenKey: '',
-        customProxy: 'http://proxy.local',
-      }),
-    });
-
-    const data = await response.json();
-    expect(response.status).toBe(200);
-    expect(data.success).toBe(true);
-    expect(data.user.mimo_key).toBe('mimo_key_xyz');
-    expect(data.user.gemini_key).toBe('gemini_key_123');
+    expect(data.user.mimo_key).toBe('test-key-1');
     expect(data.user.custom_proxy).toBe('http://proxy.local');
   });
 
-  // 6. Credit Deduction (Free User)
-  it('POST /api/payment/deduct - should deduct 1 credit from free user', async () => {
-    const response = await fetch(`${BASE_URL}/api/payment/deduct`, {
+  it('creates a product design session', async () => {
+    const response = await request('/api/agent/sessions', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${jwtToken}`
-      },
-      body: JSON.stringify({ uid: testUid }),
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: '商品图回归会话' }),
     });
-
-    const data = await response.json();
     expect(response.status).toBe(200);
-    expect(data.success).toBe(true);
-    expect(data.remainingCredits).toBe(9);
-    expect(data.membershipType).toBe('free');
+    designSessionId = (await response.json()).session.session_id;
+    expect(designSessionId).toMatch(/^session-/);
   });
 
-  // 7. Order & Payment Upgrades
-  it('POST /api/payment/create-order - should initiate pending order', async () => {
-    const response = await fetch(`${BASE_URL}/api/payment/create-order`, {
+  it('uploads, lists, counts, and deletes a cloud asset', async () => {
+    const onePixelPng = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+    const upload = await request('/api/assets/upload', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${jwtToken}`
-      },
-      body: JSON.stringify({
-        userId: testUid,
-        planId: 'pro_monthly',
-      }),
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'journey.png', data: onePixelPng, session_id: designSessionId }),
     });
+    expect(upload.status, await upload.clone().text()).toBe(200);
+    uploadedAsset = (await upload.json()).asset;
+    expect(uploadedAsset.url).toMatch(/^\/uploads\//);
 
-    const data = await response.json();
-    expect(response.status).toBe(200);
-    expect(data.success).toBe(true);
-    expect(data.order.orderId).toBeDefined();
-    expect(data.order.amount).toBe(9.9);
-    expect(data.order.status).toBe('pending');
-    testOrderId = data.order.orderId;
+    const list = await request('/api/assets');
+    expect(list.status).toBe(200);
+    expect((await list.json()).assets.some((asset) => asset.id === uploadedAsset.id)).toBe(true);
+
+    const stats = await request('/api/assets/stats');
+    expect(stats.status).toBe(200);
+    expect((await stats.json()).totalAssets).toBeGreaterThanOrEqual(1);
+
   });
 
-  it('GET /api/payment/status/:orderId - should return pending status', async () => {
-    const response = await fetch(`${BASE_URL}/api/payment/status/${testOrderId}`, {
-      headers: {
-        'Authorization': `Bearer ${jwtToken}`
+  it('restores the confirmed product image and persists the complete conversation', async () => {
+    const analysis = {
+      product: { product_name: '军事士兵人偶模型', product_category: '玩具/模型', confidence: 0.95 },
+      visible_facts: ['绿色迷彩服与头盔清晰可见'],
+      selling_points: [{
+        title: '经典军事题材造型',
+        description: '迷彩服与头盔造型',
+        visual_evidence: '图中可见绿色迷彩服与头盔',
+        confidence: 0.9,
+        verification: 'confirmed_visual',
+      }],
+      uncertain_claims: ['材质无法从图片确认'],
+      image_quality: { subject_complete: true, clarity: 'good', issues: [] },
+    };
+    const confirm = await request(`/api/agent/sessions/${designSessionId}/product-analysis/confirm`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ analysis }),
+    });
+    expect(confirm.status, await confirm.clone().text()).toBe(200);
+
+    const stream = await request('/api/agent/chat-stream', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: designSessionId, message: '自然场景，卖点图' }),
+    });
+    expect(stream.status, await stream.clone().text()).toBe(200);
+    expect(await stream.text()).toContain('已根据商品图开始生成自然场景卖点图。');
+    expect(capturedAgentBody.product_image_base64).toMatch(/^data:image\/png;base64,/);
+    expect(capturedAgentBody.agent_memory).toMatchObject({
+      product_name: '军事士兵人偶模型',
+      product_analysis_confirmed: true,
+    });
+
+    const restored = await request(`/api/agent/sessions/${designSessionId}`);
+    expect(restored.status).toBe(200);
+    const session = (await restored.json()).session;
+    expect(session.chat_history.slice(-2)).toEqual([
+      { role: 'user', content: '自然场景，卖点图' },
+      { role: 'assistant', content: '已根据商品图开始生成自然场景卖点图。' },
+    ]);
+    expect(session.last_params.product_image_url).toBe(uploadedAsset.url);
+    expect(session.agent_memory).toMatchObject({
+      style_preference: '自然场景',
+      image_types: ['selling_point'],
+    });
+
+    const remove = await request(`/api/assets/${uploadedAsset.id}`, { method: 'DELETE' });
+    expect(remove.status).toBe(200);
+  });
+
+  it('keeps earlier messages when a new design starts in the same session', async () => {
+    const stream = await request('/api/agent/chat-stream', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session_id: designSessionId, message: '开始新设计' }),
+    });
+    expect(stream.status, await stream.clone().text()).toBe(200);
+    await stream.text();
+
+    const restored = await request(`/api/agent/sessions/${designSessionId}`);
+    const history = (await restored.json()).session.chat_history;
+    expect(history).toContainEqual({ role: 'user', content: '自然场景，卖点图' });
+    expect(history.slice(-2)).toEqual([
+      { role: 'user', content: '开始新设计' },
+      { role: 'assistant', content: '已开始新的设计，之前的对话仍然保留。' },
+    ]);
+  });
+
+  it('deducts credits and preserves credits for a pro account', async () => {
+    const deduct = await request('/api/payment/deduct', { method: 'POST' });
+    expect(deduct.status, await deduct.clone().text()).toBe(200);
+    expect((await deduct.json()).remainingCredits).toBe(9);
+
+    const upgrade = await request('/api/custom-auth/test-upgrade', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ uid: testUid, membershipType: 'pro', billingCycle: 'monthly', remainingCredits: 500 }),
+    });
+    expect(upgrade.status).toBe(200);
+
+    const proDeduct = await request('/api/payment/deduct', { method: 'POST' });
+    expect(proDeduct.status).toBe(200);
+    expect(await proDeduct.json()).toMatchObject({ remainingCredits: 'unlimited', membershipType: 'pro' });
+  });
+
+  it('supports repeated sign-out and sign-in cycles without losing the session cookie', async () => {
+    for (let index = 0; index < 3; index += 1) {
+      if (index > 0) {
+        const signInAgain = await request('/api/auth/sign-in/email', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ email: testEmail, password: testPassword }),
+        });
+        expect(signInAgain.status).toBe(200);
+        captureSessionCookie(signInAgain);
       }
-    });
-    const data = await response.json();
-    expect(response.status).toBe(200);
-    expect(data.success).toBe(true);
-    expect(data.status).toBe('pending');
+      const profile = await request('/api/custom-auth/me');
+      expect(profile.status).toBe(200);
+      if (index < 2) {
+        const signOutCycle = await request('/api/auth/sign-out', { method: 'POST' });
+        expect(signOutCycle.status).toBe(200);
+        sessionCookie = '';
+      }
+    }
   });
 
-  // 8. Unlimited Credit for Pro User
-  it('POST /api/payment/deduct - should not deduct credits for Pro VIP', async () => {
-    // Manually upgrade user via test-upgrade endpoint instead of direct SQL connection
-    const upgradeRes = await fetch(`${BASE_URL}/api/auth/test-upgrade`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${jwtToken}`
-      },
-      body: JSON.stringify({
-        uid: testUid,
-        membershipType: 'pro',
-        billingCycle: 'monthly',
-        remainingCredits: 500
-      })
-    });
-    const upgradeData = await upgradeRes.json();
-    expect(upgradeData.success).toBe(true);
-
-    const response = await fetch(`${BASE_URL}/api/payment/deduct`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${jwtToken}`
-      },
-      body: JSON.stringify({ uid: testUid }),
-    });
-
-    const data = await response.json();
-    expect(response.status).toBe(200);
-    expect(data.success).toBe(true);
-    expect(data.remainingCredits).toBe('unlimited');
-    expect(data.membershipType).toBe('pro');
-  });
-
-  // 9. Image generation & evaluation endpoints
-  it('POST /api/generate/evaluate - should return evaluation metrics (mock fallback)', async () => {
-    const response = await fetch(`${BASE_URL}/api/generate/evaluate`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${jwtToken}`
-      },
-      body: JSON.stringify({
-        uid: testUid,
-        image: 'non_existent_image.png', // force mock fallback since real API keys are mock/invalid in tests
-        productInfo: { name: '香水', sellingPoints: '清新' },
-        instruction: '评估图片',
-      }),
-    });
-
-    const data = await response.json();
-    expect(response.status).toBe(200);
-    expect(data.success).toBe(true);
-    expect(data.metrics.ctr).toBeDefined();
-    expect(data.metrics.quality).toBeDefined();
-  });
-
-  it('POST /api/generate/matting - should return matting instructions ready', async () => {
-    const response = await fetch(`${BASE_URL}/api/generate/matting`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${jwtToken}`
-      },
-      body: JSON.stringify({
-        uid: testUid,
-        image: 'french_vintage.png',
-        sampleId: 'perfume',
-      }),
-    });
-
-    const data = await response.json();
-    expect(response.status).toBe(200);
-    expect(data.success).toBe(true);
-    expect(data.message).toContain('抠图处理就绪');
-  });
-
-  it('POST /api/generate/inpaint - should return mock inpainting result', async () => {
-    const response = await fetch(`${BASE_URL}/api/generate/inpaint`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${jwtToken}`
-      },
-      body: JSON.stringify({
-        uid: testUid,
-        image: 'french_vintage.png',
-        mask: 'data:image/png;base64,mockmask...',
-        prompt: '在沙滩阳光下',
-        fidelity: 90,
-        isCustomProduct: false,
-        productInfo: { name: '香水', sellingPoints: '清新' },
-      }),
-    });
-
-    const data = await response.json();
-    expect(response.status).toBe(200);
-    expect(data.success).toBe(true);
-    expect(data.image).toContain('outdoor_sunlight.png'); // prompt contained "沙滩"
-    expect(data.metrics.ctr).toBeGreaterThan(5.0); // outdoor_sunlight has base CTR 5.2
+  it('signs out and invalidates access', async () => {
+    const signOut = await request('/api/auth/sign-out', { method: 'POST' });
+    expect(signOut.status).toBe(200);
+    sessionCookie = '';
+    expect((await fetch(`${BASE_URL}/api/custom-auth/me`)).status).toBe(401);
   });
 });

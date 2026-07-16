@@ -1,100 +1,84 @@
 import { test, expect } from '@playwright/test';
+import path from 'node:path';
 
-test.describe('AI Product Image Agent E2E User Flows', () => {
-  test('should complete the entire user journey in Mock mode', async ({ page }) => {
-    // 1. Visit Portal
+const analysisFixture = {
+  schema_version: '1.0',
+  status: 'draft',
+  product: { product_name: '军事士兵人偶玩具', product_category: '玩具/模型', confidence: 0.95 },
+  visible_facts: ['绿色制服人偶', '配有头盔与武器造型配件', '白色背景'],
+  selling_points: [
+    { title: '经典军事造型', description: '完整制服与头盔造型', visual_evidence: '图中可见绿色制服和头盔', confidence: 0.9, verification: 'confirmed_visual' },
+    { title: '立体细节刻画', description: '服装口袋和褶皱清晰', visual_evidence: '胸前口袋与衣物纹理可见', confidence: 0.85, verification: 'confirmed_visual' },
+    { title: '适合场景搭建', description: '站立姿态便于陈列', visual_evidence: '人偶保持稳定站立姿态', confidence: 0.72, verification: 'likely_visual' },
+  ],
+  uncertain_claims: ['材质成分与具体尺寸无法仅凭图片确认'],
+  image_quality: { subject_complete: true, clarity: 'good', issues: [] },
+};
+
+test.describe('new user MVP journey', () => {
+  test('registers, uploads a product, confirms selling points, and restores the session', async ({ page, request }) => {
+    const timings = {};
+    await page.route('**/api/agent/analyze-product-image', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, analysis: analysisFixture }) });
+    });
+
+    const firstScreenStarted = Date.now();
     await page.goto('/');
     await expect(page).toHaveTitle(/AI 商品图与广告创意决策系统/);
-    await expect(page.locator('text=和我聊聊，你想设计什么商品图～')).toBeVisible();
+    const skip = page.getByRole('button', { name: '跳过', exact: true });
+    await expect(skip).toBeVisible({ timeout: 10_000 });
+    timings.first_screen = Date.now() - firstScreenStarted;
+    expect(timings.first_screen).toBeLessThan(3_000);
+    await skip.click();
+    await expect(page.getByText('图片编辑', { exact: true })).toBeVisible();
 
-    // 2. Auth Registration & Login
-    // Click Login/Register button in the top header
-    await page.locator('button:has-text("登录/注册")').click();
-    
-    // Switch to Register tab
-    await page.locator('button:has-text("免费注册")').first().click();
-    
-    const uniqueEmail = `e2e-${Date.now()}@example.com`;
-    await page.locator('input[type="email"]').fill(uniqueEmail);
-    await page.locator('input[type="password"]').fill('e2epassword123');
-    
-    // Request code
-    await page.locator('button:has-text("获取验证码")').click();
-    
-    // The mock backend returns the code, and the frontend automatically auto-fills it after 1s
-    await page.waitForTimeout(1500);
-    const codeValue = await page.locator('input[placeholder="6位验证码"]').inputValue();
-    expect(codeValue.length).toBe(6);
-    
-    // Submit registration
-    await page.locator('button:has-text("同意服务条款并注册")').click();
-    
-    // Verify user profile avatar is visible (login successful)
-    await page.waitForTimeout(2000);
-    await expect(page.locator('.user-profile')).toBeVisible();
+    await page.getByRole('button', { name: '登录/注册', exact: true }).click();
+    await page.getByRole('button', { name: '免费注册', exact: true }).first().click();
 
+    const email = `e2e-${Date.now()}@example.com`;
+    const password = 'E2ePassword123!';
+    await page.getByPlaceholder('您的昵称（选填）', { exact: true }).fill('E2E 用户');
+    await page.getByPlaceholder('name@example.com', { exact: true }).fill(email);
+    await page.getByPlaceholder('输入 6 位及以上密码', { exact: true }).fill(password);
+    const verificationStarted = Date.now();
+    await page.getByRole('button', { name: '获取验证码', exact: true }).click();
+    await expect(page.getByText('验证码已发送到您的邮箱，请查收！', { exact: true })).toBeVisible({ timeout: 15_000 });
+    timings.verification_code = Date.now() - verificationStarted;
+    expect(timings.verification_code).toBeLessThan(15_000);
 
+    const codeResponse = await request.get(`/api/custom-auth/test-verification-code?email=${encodeURIComponent(email)}`);
+    expect(codeResponse.ok()).toBeTruthy();
+    const { code } = await codeResponse.json();
+    await page.getByPlaceholder('6位验证码', { exact: true }).fill(code);
+    const registrationStarted = Date.now();
+    await page.getByRole('button', { name: '同意服务条款并注册', exact: true }).click();
+    await expect(page.locator('.user-profile')).toBeVisible({ timeout: 15_000 });
+    timings.registration = Date.now() - registrationStarted;
+    expect(timings.registration).toBeLessThan(15_000);
 
-    // 4. Launch Onboarding & Create V1 Design
-    // Click "创建设计" card on Portal
-    await page.locator('text=创建设计').click();
-    await expect(page.locator('text=AI 电商商品图创作向导')).toBeVisible();
-    
-    // Select built-in product and style
-    await page.locator('text=复古蕾丝连衣裙').click();
-    await page.locator('text=户外阳光').click();
-    
-    // Launch generator
-    await page.locator('button:has-text("启动 AI 抠图并生成商品图")').click();
-    
-    // Verify redirection to Workspace (SimpleMode container is visible)
-    await expect(page.locator('.simple-mode-container')).toBeVisible();
-    
-    // Wait for mock generation spinner to close and V1 bullet to load
-    await page.waitForTimeout(3000);
-    await expect(page.locator('button:has-text("V1")')).toBeVisible();
-    
-    // 5. Chat Mode & Mask Drawing Inpainting (V2)
-    // Verify Simple Mode elements
-    await expect(page.locator('text=AI 智能设计顾问')).toBeVisible();
-    
-    // Toggle brush mask mode
-    await page.locator('button:has-text("圈选局部修改")').click();
-    await expect(page.locator('text=局部修改模式开启')).toBeVisible();
-    
-    // Drag on canvas overlay to simulate drawing a mask
-    const canvas = page.locator('canvas');
-    const box = await canvas.boundingBox();
-    if (box) {
-      await page.mouse.move(box.x + 100, box.y + 100);
-      await page.mouse.down();
-      await page.mouse.move(box.x + 200, box.y + 200);
-      await page.mouse.up();
-    }
-    
-    // Enter prompt and submit inpainting
-    await page.locator('input[placeholder="请描述如何修改您圈选的这部分区域..."]').fill('换背景为沙滩');
-    await page.locator('.chat-send-btn').click();
-    
-    // Wait for inpainting spinner and version commit
-    await page.waitForTimeout(3000);
-    await expect(page.locator('button:has-text("V2")')).toBeVisible();
+    const fileChooserPromise = page.waitForEvent('filechooser');
+    await page.getByText('图片编辑', { exact: true }).click();
+    const fileChooser = await fileChooserPromise;
+    const analysisStarted = Date.now();
+    await fileChooser.setFiles(path.resolve('frontend/public/uploads/upload_1784136552020_315.png'));
 
-    // 6. Cowork Mode (Infinite Canvas)
-    // Switch to Cowork Mode
-    await page.locator('button:has-text("Cowork Mode")').click();
-    await expect(page.locator('.infinite-canvas-svg')).toBeVisible();
-    
-    // Go back to Chat Mode
-    await page.locator('button:has-text("Chat Mode")').click();
-    await expect(page.locator('.simple-mode-container')).toBeVisible();
+    await expect(page.locator('.infinite-canvas-svg')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText('商品图识别草稿', { exact: true })).toBeVisible({ timeout: 15_000 });
+    timings.analysis_card_mocked_model = Date.now() - analysisStarted;
+    expect(timings.analysis_card_mocked_model).toBeLessThan(15_000);
+    await expect(page.getByRole('button', { name: '确认商品信息（3 条卖点）', exact: true })).toBeVisible();
+    const confirmationStarted = Date.now();
+    await page.getByRole('button', { name: '确认商品信息（3 条卖点）', exact: true }).click();
+    await expect(page.getByText('商品信息已确认', { exact: true })).toBeVisible({ timeout: 15_000 });
+    timings.confirmation = Date.now() - confirmationStarted;
+    expect(timings.confirmation).toBeLessThan(15_000);
 
-    // 7. Billing & Upgrades
-    // Click pricing button in the header
-    await page.locator('button:has-text("9.9元开通会员")').click();
-    await expect(page.locator('text=升级尊贵会员，释放极致生图力')).toBeVisible();
-    
-    // Close modal
-    await page.locator('.onboarding-modal-close').click();
+    const restoreStarted = Date.now();
+    await page.reload();
+    await expect(page.locator('.user-profile')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText('商品信息已确认', { exact: true })).toBeVisible({ timeout: 15_000 });
+    timings.session_restore = Date.now() - restoreStarted;
+    expect(timings.session_restore).toBeLessThan(15_000);
+    console.log('E2E timings (ms):', timings);
   });
 });

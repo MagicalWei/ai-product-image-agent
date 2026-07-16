@@ -258,12 +258,12 @@ class TestRAGIntegration:
         from agent.models import ActionParams, CanvasState
 
         canvas = CanvasState(canvas_id="test_canvas")
-        params = ActionParams(action="search_knowledge")
-        params.model_extra = {
-            "rag_retriever": mock_rag_retriever,
-            "query": "蓝牙耳机 白底图",
-            "categories": ["prompt_template", "style_guide"],
-        }
+        params = ActionParams(
+            action="search_knowledge",
+            rag_retriever=mock_rag_retriever,
+            query="蓝牙耳机 白底图",
+            categories=["prompt_template", "style_guide"],
+        )
 
         result = await search_knowledge_fn(params, canvas)
 
@@ -283,8 +283,7 @@ class TestRAGIntegration:
         from agent.models import ActionParams, CanvasState
 
         canvas = CanvasState(canvas_id="test_canvas")
-        params = ActionParams(action="search_knowledge")
-        params.model_extra = {"query": "test"}
+        params = ActionParams(action="search_knowledge", query="test")
 
         result = await search_knowledge_fn(params, canvas)
         assert result.success is False
@@ -557,8 +556,8 @@ class TestActionCoverage:
         for tool in old_tools:
             assert tool in new_equivalents, f"No entry for old tool: {tool}"
 
-    def test_seven_actions_registered(self):
-        """Seven action handlers should be registered (6 original + search_knowledge)."""
+    def test_all_actions_registered(self):
+        """Every sense-decide-act-review action should be registered."""
         sys.path.insert(0, os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..")
         ))
@@ -577,6 +576,8 @@ class TestActionCoverage:
             "upscale",
             "layout_suggest",
             "search_knowledge",
+            "style_transfer_batch",
+            "generate_product_set",
         }
         actual = set(ACTION_REGISTRY.keys())
         assert actual == expected, f"Action mismatch. Extra: {actual - expected}, Missing: {expected - actual}"
