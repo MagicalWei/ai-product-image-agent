@@ -94,6 +94,22 @@ router.get(
 
 // Test upgrade helper route (ONLY enabled in test environment, NOT in development)
 if (process.env.NODE_ENV === 'test') {
+  router.get(
+    '/test-verification-code',
+    asyncHandler(async (req, res) => {
+      const email = String(req.query.email || '').trim().toLowerCase();
+      if (!email) throw new AppError('缺少邮箱', 400);
+      const result = await pool.query(
+        `SELECT code FROM email_verification_codes
+         WHERE email = $1 AND used = false AND expires_at > NOW()
+         ORDER BY created_at DESC LIMIT 1`,
+        [email]
+      );
+      if (result.rowCount === 0) throw new AppError('测试验证码不存在', 404);
+      res.json({ success: true, code: result.rows[0].code });
+    })
+  );
+
   router.post(
     '/test-upgrade',
     optionalSessionAuth,

@@ -11,6 +11,11 @@ const authPool = new pg.Pool({
     ? false
     : { rejectUnauthorized: config.NODE_ENV === 'production' },
   max: 5,
+  connectionTimeoutMillis: 15000,
+  idleTimeoutMillis: 10000,
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 5000,
+  maxUses: 500,
 });
 
 authPool.on('error', (err) => {
@@ -24,6 +29,11 @@ function generateCode() {
 
 // Send email via EmailJS
 async function sendEmailJS(email, code) {
+  if (config.NODE_ENV === 'test') {
+    console.log(`[BetterAuth Test] Verification code ${code} for ${email.toLowerCase()}`);
+    return;
+  }
+
   const serviceId = config.EMAILJS_SERVICE_ID;
   const templateId = config.EMAILJS_TEMPLATE_ID;
   const publicKey = config.EMAILJS_PUBLIC_KEY;

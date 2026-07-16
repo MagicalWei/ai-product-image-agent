@@ -179,8 +179,7 @@ router.post(
           `UPDATE users
            SET membership_type = $1,
                billing_cycle = 'monthly',
-               remaining_credits = remaining_credits + $2,
-               updated_at = NOW()
+               remaining_credits = remaining_credits + $2
            WHERE uid = $3`,
           [membershipType || 'pro', creditsNum, uid]
         );
@@ -291,7 +290,7 @@ router.post(
         throw new AppError('信用额度不足，请充值后继续使用', 402);
       }
       remainingCredits -= 1;
-      await pool.query('UPDATE users SET remaining_credits = $1, updated_at = NOW() WHERE uid = $2', [remainingCredits, uid]);
+      await pool.query('UPDATE users SET remaining_credits = $1 WHERE uid = $2', [remainingCredits, uid]);
       await writeUsageLog(pool, uid, 'deduct', -1, remainingCredits, 'Deduct 1 credit for image generation');
     }
 
@@ -324,7 +323,7 @@ router.post(
 
     if (user.membership_type !== 'pro' && user.membership_type !== 'enterprise') {
       remainingCredits += 1;
-      await pool.query('UPDATE users SET remaining_credits = $1, updated_at = NOW() WHERE uid = $2', [remainingCredits, uid]);
+      await pool.query('UPDATE users SET remaining_credits = $1 WHERE uid = $2', [remainingCredits, uid]);
       await writeUsageLog(pool, uid, 'refund', 1, remainingCredits, detail || 'Refund 1 credit due to failure');
     }
 
@@ -374,7 +373,7 @@ router.post(
         throw new AppError('信用额度不足', 402);
       }
       remainingCredits -= 1;
-      await pool.query('UPDATE users SET remaining_credits = $1, updated_at = NOW() WHERE uid = $2', [remainingCredits, uid]);
+      await pool.query('UPDATE users SET remaining_credits = $1 WHERE uid = $2', [remainingCredits, uid]);
     }
 
     await writeUsageLog(pool, uid, 'charge', 0, remainingCredits, detail || 'Charge generation');

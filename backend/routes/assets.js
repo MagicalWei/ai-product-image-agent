@@ -29,7 +29,7 @@ export function setPool(p) {
 
 // ─── POST /upload ─────────────────────────────────────────────────────────────
 // Accepts base64 image data in the request body and saves to disk.
-// Body size limit is enforced globally in index.js (10 MB).
+// Body size limit is enforced globally in server.js (16 MB JSON, enough for a 10 MB image).
 router.post(
   '/upload',
   authenticateSession,
@@ -68,6 +68,18 @@ router.post(
     const ext = path.extname(name) || '.png';
     const uniqueFileName = `upload_${Date.now()}_${Math.floor(Math.random() * 1000)}${ext}`;
 
+    // A browser can retain a stale local session id after a session is deleted
+    // or an account changes. Do not let that optional association break the
+    // actual upload; only persist session ids owned by the current user.
+    let sessionId = null;
+    if (req.body.session_id) {
+      const sessionResult = await pool.query(
+        'SELECT session_id FROM doubao_agent_sessions WHERE session_id = $1 AND uid = $2',
+        [req.body.session_id, uid]
+      );
+      sessionId = sessionResult.rows[0]?.session_id || null;
+    }
+
     // Save binary file using StorageProvider
     const relativeUrl = await storage.saveFile(buffer, uniqueFileName);
     const assetId = 'asset-' + crypto.randomUUID();
@@ -84,7 +96,7 @@ router.post(
         new Date().toISOString().split('T')[0],
         metrics ? (typeof metrics === 'string' ? metrics : JSON.stringify(metrics)) : null,
         'user_uploaded',
-        req.body.session_id || null
+        sessionId
       ]
     );
 
@@ -117,7 +129,13 @@ router.get(
       [uid]
     );
 
-    res.json({ success: true, assets: result.rows });
+    const assets = result.rows.map((asset) => ({
+      ...asset,
+      url: typeof asset.url === 'string' && asset.url.startsWith('uploads/')
+        ? `/${asset.url}`
+        : asset.url,
+    }));
+    res.json({ success: true, assets });
   })
 );
 // ─── GET /stats ───────────────────────────────────────────────────────────────
