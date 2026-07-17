@@ -4,8 +4,12 @@ import { authenticateSession } from '../auth/sessionMiddleware.js';
 import { asyncHandler, AppError } from '../middleware/errorHandler.js';
 import { createRateLimiter } from '../middleware/rateLimit.js';
 import createStorageProvider from '../utils/storage.js';
-import { appendConversationTurns, mergeConversationHistory, recoverConversationHistory } from '../utils/conversation.js';
+import { appendConversationTurns, mergeConversationHistory, recoverConversationHistory, toModelConversationHistory } from '../utils/conversation.js';
 import { loadBrandMemory, saveBrandMemory } from '../agents/contextStore.js';
+import { fetchWithRetries, isConnectivityError } from '../utils/reliableFetch.js';
+import { createResilientPool } from '../utils/transientErrors.js';
+import { recoverCanvasFromAssets } from '../utils/canvasRecovery.js';
+import { restoreStyleReferenceImages, selectStyleReferenceUrls } from '../utils/styleReferences.js';
 
 const router = Router();
 const storage = createStorageProvider(process.env.STORAGE_TYPE || 'local');
@@ -31,6 +35,20 @@ const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:8000';
 const AI_TIMEOUT_MS = 120_000;
 const activeAgentStreams = new Map();
 const MAX_AGENT_STREAMS_PER_USER = Number(process.env.MAX_AGENT_STREAMS_PER_USER || 1);
+const AGENT_TOOL_STATUS_LABELS = {
+  generate_image: '正在生成图片...',
+  evaluate_image: '正在评估图片质量...',
+  query_canvas: '正在查询画布状态...',
+  search_knowledge: '正在搜索知识库...',
+  generate_product_set: '正在生成你选择的商品图...',
+  style_transfer_batch: '正在分析参考风格并生成图片...',
+  update_plan: '正在更新设计方案...',
+  finish_task: '任务完成',
+};
+
+function agentToolStatusText(tool) {
+  return `🔧 ${AGENT_TOOL_STATUS_LABELS[tool] || `正在执行: ${tool}`}`;
+}
 
 const agentStreamLimiter = createRateLimiter({
   windowMs: 60 * 1000,
@@ -43,7 +61,7 @@ const agentStreamLimiter = createRateLimiter({
 
 let pool;
 export function setPool(p) {
-  pool = p;
+  pool = createResilientPool(p);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -91,6 +109,12 @@ function normalizeConfirmedProductAnalysis(input) {
   return {
     schema_version: '1.0',
     status: 'confirmed',
+    ...(Number.isFinite(Number(input?._timeline?.after_turn_count)) ? {
+      _timeline: {
+        after_turn_count: Math.max(0, Number(input._timeline.after_turn_count)),
+        analyzed_at: String(input?._timeline?.analyzed_at || '').slice(0, 64),
+      },
+    } : {}),
     product: {
       product_name: productName,
       product_category: productCategory,
@@ -118,7 +142,7 @@ async function loadStoredProductImage(uid, sessionId, previousParams) {
     const assetResult = await pool.query(
       `SELECT url FROM assets
        WHERE uid = $1 AND session_id = $2 AND source = 'user_uploaded'
-         AND COALESCE(metrics->>'asset_role', 'product') <> 'style_reference'
+         AND COALESCE(metrics->>'asset_role', 'product') NOT IN ('style_reference', 'chat_attachment')
        ORDER BY created_at DESC LIMIT 1`,
       [uid, sessionId]
     );
@@ -178,7 +202,10 @@ router.get(
     const result = await pool.query(
       `SELECT s.session_id, s.title, s.current_state, s.updated_at,
               jsonb_array_length(s.chat_history) AS message_count,
-              (SELECT COUNT(*)::int FROM assets a WHERE a.session_id = s.session_id) AS image_count
+              (SELECT COUNT(DISTINCT a.url)::int FROM assets a
+               WHERE a.session_id = s.session_id
+                 AND (a.source = 'ai_generated'
+                      OR COALESCE(a.metrics->>'asset_role', 'product') NOT IN ('style_reference', 'chat_attachment'))) AS image_count
        FROM doubao_agent_sessions s
        WHERE s.uid = $1
        ORDER BY s.updated_at DESC`,
@@ -199,6 +226,19 @@ router.get(
     );
     if (result.rowCount === 0) throw new AppError('会话未找到', 404);
     const session = result.rows[0];
+    const assetResult = await pool.query(
+      `SELECT id, name, url, source, metrics, created_at
+       FROM assets WHERE session_id = $1 AND uid = $2 ORDER BY created_at`,
+      [req.params.id, req.user.uid]
+    );
+    const recoveredCanvas = recoverCanvasFromAssets(session.canvas_state, assetResult.rows);
+    if (recoveredCanvas.recoveredCount > 0) {
+      session.canvas_state = recoveredCanvas.canvasState;
+      await pool.query(
+        'UPDATE doubao_agent_sessions SET canvas_state = $1 WHERE session_id = $2 AND uid = $3',
+        [JSON.stringify(session.canvas_state), req.params.id, req.user.uid]
+      );
+    }
     const recoveredHistory = recoverConversationHistory(session.chat_history, session.agent_memory);
     if ((!session.chat_history || session.chat_history.length === 0) && recoveredHistory.length > 0) {
       session.chat_history = recoveredHistory;
@@ -217,10 +257,15 @@ router.post(
   authenticateSession,
   asyncHandler(async (req, res) => {
     const uid = req.user.uid;
-    const sessionId = 'session-' + crypto.randomUUID();
+    const requestedSessionId = String(req.body.client_session_id || '');
+    const sessionId = /^session-[a-zA-Z0-9-]{8,80}$/.test(requestedSessionId)
+      ? requestedSessionId
+      : 'session-' + crypto.randomUUID();
     const title = req.body.title || '新设计会话';
     await pool.query(
-      'INSERT INTO doubao_agent_sessions (session_id, uid, title, current_state, chat_history, last_params) VALUES ($1, $2, $3, $4, $5, $6)',
+      `INSERT INTO doubao_agent_sessions (session_id, uid, title, current_state, chat_history, last_params)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (session_id) DO NOTHING`,
       [sessionId, uid, title, 'COLLECTING_INFO', JSON.stringify([]), JSON.stringify({})]
     );
     res.json({
@@ -278,6 +323,66 @@ router.put(
   })
 );
 
+// Repair/sync the user-visible conversation timeline. This endpoint exists for
+// legacy sessions whose tool status records only survived in browser cache.
+// The current durable server history must remain an ordered subsequence, so a
+// stale or incomplete client can add missing UI records but cannot erase chat.
+router.put(
+  '/sessions/:id/conversation-history',
+  authenticateSession,
+  asyncHandler(async (req, res) => {
+    const submitted = Array.isArray(req.body?.chat_history) ? req.body.chat_history : null;
+    if (!submitted) throw new AppError('缺少对话历史数据', 400);
+    if (submitted.length > 1000) throw new AppError('对话历史记录过长', 400);
+
+    const normalized = submitted
+      .map((turn) => {
+        const role = ['user', 'assistant', 'status'].includes(turn?.role) ? turn.role : '';
+        const content = String(turn?.content || '').trim().slice(0, 20_000);
+        if (!role || !content) return null;
+        return {
+          ...(turn.id ? { id: String(turn.id).slice(0, 160) } : {}),
+          role,
+          content,
+          ...(turn.agent ? { agent: String(turn.agent).slice(0, 80) } : {}),
+          ...(turn.type ? { type: String(turn.type).slice(0, 80) } : {}),
+          ...(role === 'user' && Array.isArray(turn.images) ? { images: turn.images.slice(0, 12) } : {}),
+        };
+      })
+      .filter(Boolean);
+
+    const currentResult = await pool.query(
+      'SELECT chat_history FROM doubao_agent_sessions WHERE session_id = $1 AND uid = $2',
+      [req.params.id, req.user.uid],
+    );
+    if (currentResult.rowCount === 0) throw new AppError('会话未找到', 404);
+    const current = Array.isArray(currentResult.rows[0].chat_history)
+      ? currentResult.rows[0].chat_history
+      : [];
+
+    let incomingIndex = 0;
+    for (const durableTurn of current) {
+      while (
+        incomingIndex < normalized.length
+        && !(normalized[incomingIndex].role === durableTurn.role
+          && normalized[incomingIndex].content === durableTurn.content)
+      ) incomingIndex += 1;
+      if (incomingIndex >= normalized.length) {
+        throw new AppError('本地对话版本过旧，已保留云端历史', 409);
+      }
+      incomingIndex += 1;
+    }
+
+    await pool.query(
+      `UPDATE doubao_agent_sessions
+       SET chat_history = $1, updated_at = CURRENT_TIMESTAMP
+       WHERE session_id = $2 AND uid = $3`,
+      [JSON.stringify(normalized), req.params.id, req.user.uid],
+    );
+    res.json({ success: true, repaired_count: Math.max(0, normalized.length - current.length) });
+  }),
+);
+
 // 7.5 PUT /api/agent/sessions/:id/canvas-state — 专门保存画布状态
 router.put(
   '/sessions/:id/canvas-state',
@@ -310,19 +415,18 @@ router.post(
     }
 
     const session = await pool.query(
-      'SELECT session_id FROM doubao_agent_sessions WHERE session_id = $1 AND uid = $2',
+      'SELECT session_id, chat_history FROM doubao_agent_sessions WHERE session_id = $1 AND uid = $2',
       [session_id, req.user.uid]
     );
     if (session.rowCount === 0) throw new AppError('会话未找到', 404);
 
     console.log(`[Agent] Forwarding product image analysis for: ${file_name || 'unnamed'}`);
 
-    const pythonResponse = await fetch(`${AI_SERVICE_URL}/agent/analyze-product-image`, {
+    const pythonResponse = await fetchWithRetries(`${AI_SERVICE_URL}/agent/analyze-product-image`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ image_base64, file_name: file_name || '' }),
-      signal: AbortSignal.timeout(AI_TIMEOUT_MS),
-    });
+    }, { attempts: 3, timeoutMs: AI_TIMEOUT_MS });
 
     if (!pythonResponse.ok) {
       const errText = await pythonResponse.text();
@@ -334,13 +438,20 @@ router.post(
     if (!result.success || !result.analysis) {
       throw new AppError('多模态模型未返回有效分析结果', 502);
     }
+    const storedAnalysis = {
+      ...result.analysis,
+      _timeline: {
+        after_turn_count: Array.isArray(session.rows[0]?.chat_history) ? session.rows[0].chat_history.length : 0,
+        analyzed_at: new Date().toISOString(),
+      },
+    };
     await pool.query(
       `UPDATE doubao_agent_sessions
        SET product_analysis_draft = $1, updated_at = CURRENT_TIMESTAMP
        WHERE session_id = $2 AND uid = $3`,
-      [JSON.stringify(result.analysis), session_id, req.user.uid]
+      [JSON.stringify(storedAnalysis), session_id, req.user.uid]
     );
-    res.json(result);
+    res.json({ ...result, analysis: storedAnalysis });
   })
 );
 
@@ -362,7 +473,7 @@ router.put(
     const latestAsset = await pool.query(
       `SELECT url FROM assets
        WHERE uid = $1 AND session_id = $2 AND source = 'user_uploaded'
-         AND COALESCE(metrics->>'asset_role', 'product') <> 'style_reference'
+         AND COALESCE(metrics->>'asset_role', 'product') NOT IN ('style_reference', 'chat_attachment')
        ORDER BY created_at DESC LIMIT 1`,
       [req.user.uid, req.params.id]
     );
@@ -443,12 +554,19 @@ router.post(
       style_reference_images: clientStyleReferenceImages,
       style_transfer_mode: clientStyleTransferMode,
       product_set_mode: clientProductSetMode,
+      message_images: clientMessageImages,
+      display_message: clientDisplayMessage,
     } = req.body;
 
     if (!message || message.trim() === '') {
       throw new AppError('请输入有效的指令消息', 400);
     }
-
+    const explicitStyleReferences = Array.isArray(clientStyleReferenceImages)
+      ? clientStyleReferenceImages.filter(Boolean)
+      : [];
+    const untypedReferences = Array.isArray(clientReferenceImages)
+      ? clientReferenceImages.filter(Boolean)
+      : [];
     // 用户校验
     const userRes = await pool.query('SELECT * FROM users WHERE uid = $1', [uid]);
     if (userRes.rowCount === 0) throw new AppError('未找到当前用户信息', 404);
@@ -486,9 +604,81 @@ router.post(
     const session = sessionRes.rows[0];
     const previousState = session.current_state;
     const previousHistory = session.chat_history || [];
+    // Persist the user's turn before any model or image request. Conversation
+    // durability must not depend on the Agent finishing successfully.
+    const durableMessageImages = Array.isArray(clientMessageImages)
+      ? clientMessageImages
+        .filter(image => image && typeof image.url === 'string' && !image.url.startsWith('data:'))
+        .slice(0, 5)
+        .map(image => ({
+          id: String(image.id || '').slice(0, 120),
+          name: String(image.name || '图片').slice(0, 160),
+          url: String(image.url).slice(0, 2048),
+          role: image.role === 'style_reference' ? 'style_reference' : undefined,
+          kind: image.kind === 'region_edit' ? 'region_edit' : undefined,
+        }))
+      : [];
+    const durableRequestHistory = appendConversationTurns(
+      previousHistory,
+      String(clientDisplayMessage || message),
+      [],
+      durableMessageImages.length > 0 ? { images: durableMessageImages } : {},
+    );
+    await pool.query(
+      'UPDATE doubao_agent_sessions SET chat_history = $1, updated_at = CURRENT_TIMESTAMP WHERE session_id = $2 AND uid = $3',
+      [JSON.stringify(durableRequestHistory), currentSessionId, uid]
+    );
     const previousParams = session.last_params || {};
     const toolResults = session.tool_results || {};
     const agentMemory = session.agent_memory || {};
+    const currentTurnHasStyleReference = durableMessageImages.some(
+      (image) => image.role === 'style_reference'
+    );
+    let recoveredStyleReferenceUrls = [];
+    if (
+      !currentTurnHasStyleReference
+      && !(Array.isArray(agentMemory.style_reference_image_urls)
+        && agentMemory.style_reference_image_urls.length > 0)
+    ) {
+      const legacyStyleAssets = await pool.query(
+        `SELECT url FROM assets
+         WHERE uid = $1 AND session_id = $2 AND source = 'user_uploaded'
+           AND metrics->>'asset_role' = 'style_reference'
+         ORDER BY created_at DESC LIMIT 3`,
+        [uid, currentSessionId]
+      );
+      recoveredStyleReferenceUrls = legacyStyleAssets.rows.map((asset) => asset.url).filter(Boolean);
+    }
+    const memoryWithRecoveredStyle = recoveredStyleReferenceUrls.length > 0
+      ? { ...agentMemory, style_reference_image_urls: recoveredStyleReferenceUrls }
+      : agentMemory;
+    const styleReferenceUrls = selectStyleReferenceUrls(memoryWithRecoveredStyle, durableMessageImages);
+    const requestAgentMemory = {
+      ...memoryWithRecoveredStyle,
+      style_reference_image_urls: styleReferenceUrls,
+      ...(currentTurnHasStyleReference || recoveredStyleReferenceUrls.length > 0
+        ? { reference_images_intent: 'style_transfer' }
+        : {}),
+    };
+
+    // Persist the durable reference before calling the Agent. A downstream
+    // model failure must not make an already-uploaded reference disappear.
+    if (currentTurnHasStyleReference || recoveredStyleReferenceUrls.length > 0) {
+      await pool.query(
+        'UPDATE doubao_agent_sessions SET agent_memory = $1, updated_at = CURRENT_TIMESTAMP WHERE session_id = $2 AND uid = $3',
+        [JSON.stringify(requestAgentMemory), currentSessionId, uid]
+      );
+    }
+    const effectiveStyleReferenceImages = explicitStyleReferences.length > 0
+      ? explicitStyleReferences
+      : await restoreStyleReferenceImages(storage, styleReferenceUrls);
+    if (
+      clientStyleTransferMode
+      && effectiveStyleReferenceImages.length + untypedReferences.length === 0
+    ) {
+      releaseActiveSlot();
+      throw new AppError('风格参考图无法恢复，请重新上传后再发送', 400);
+    }
 
     // 加载品牌记忆（异常会直接上抛给 asyncHandler）
     const brandMemory = await loadBrandMemory(pool, uid);
@@ -500,15 +690,24 @@ router.post(
       'Connection': 'keep-alive',
       'X-Accel-Buffering': 'no',
     });
+    const heartbeat = setInterval(() => {
+      if (!res.writableEnded && !res.destroyed) res.write(': heartbeat\n\n');
+    }, 15000);
+    heartbeat.unref?.();
 
     let fullResult = null;  // stores the final result for DB persistence
     const emittedAssistantMessages = [];
     let sseEnded = false;
+    let pythonStreamCompleted = false;
+    const finishStream = () => {
+      clearInterval(heartbeat);
+      releaseActiveSlot();
+    };
 
     // 监听 SSE 响应关闭/客户端断连
     res.on('close', () => {
       sseEnded = true;
-      releaseActiveSlot();
+      finishStream();
       console.log('[Agent SSE] Client disconnected');
     });
 
@@ -521,16 +720,21 @@ router.post(
     try {
       console.log(`[Agent SSE] Calling AI service stream. Phase: ${previousState}`);
 
+      // Always resolve the persisted product asset URL. The first request
+      // carries base64 directly, but follow-up requests must be able to restore
+      // the same source image after a reload or a new login.
+      const storedProductImage = await loadStoredProductImage(uid, currentSessionId, previousParams);
       const restoredProductImage = product_image_base64
-        ? { dataUrl: product_image_base64, imageUrl: previousParams.product_image_url || '' }
-        : await loadStoredProductImage(uid, currentSessionId, previousParams);
+        ? { dataUrl: product_image_base64, imageUrl: storedProductImage.imageUrl }
+        : storedProductImage;
 
-      const pythonResponse = await fetch(`${AI_SERVICE_URL}/agent/run-stream`, {
+      const pythonResponse = await fetchWithRetries(`${AI_SERVICE_URL}/agent/run-stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           current_phase: previousState,
-          chat_history: previousHistory,
+          session_id: currentSessionId,
+          chat_history: toModelConversationHistory(durableRequestHistory),
           message: message,
           product_name: clientProductName || previousParams.product_name || '',
           selling_points: clientSellingPoints || previousParams.selling_points || '',
@@ -541,14 +745,14 @@ router.post(
           image_types: clientImageTypes || previousParams.image_types || [],
           product_image_base64: restoredProductImage.dataUrl || previousParams.product_image_base64 || '',
           style_preference: clientStyle || previousParams.style_preference || '',
-          reference_images: clientReferenceImages && clientReferenceImages.length > 0 ? clientReferenceImages : (previousParams.reference_images || []),
-          style_reference_images: clientStyleReferenceImages || [],
+          reference_images: untypedReferences.length > 0 ? untypedReferences : (previousParams.reference_images || []),
+          style_reference_images: effectiveStyleReferenceImages,
           style_transfer_mode: Boolean(clientStyleTransferMode),
           product_set_mode: Boolean(clientProductSetMode),
           color_palette: previousParams.color_palette || [],
           negative_prompt: previousParams.negative_prompt || '',
           brand_memory: brandMemory,
-          agent_memory: agentMemory,
+          agent_memory: requestAgentMemory,
           skip_info_collection: req.body.skip_info_collection || false,
           skip_design_planning: req.body.skip_design_planning || false,
           single_image_mode: req.body.single_image_mode || false,
@@ -560,14 +764,26 @@ router.post(
           current_images: current_images || previousParams.current_images || {},
           tool_results: toolResults,
         }),
-        signal: AbortSignal.timeout((clientStyleTransferMode || clientProductSetMode) ? 240_000 : AI_TIMEOUT_MS),
+      }, {
+        attempts: 3,
+        timeoutMs: (clientStyleTransferMode || clientProductSetMode) ? 240_000 : AI_TIMEOUT_MS,
+        timeoutScope: 'connect',
+        retryStatuses: new Set([502, 503, 504]),
+        retryNetwork: isConnectivityError,
       });
 
       if (!pythonResponse.ok) {
         const errText = await pythonResponse.text();
-        sendSSE({ event: 'error', message: `AI 处理失败: ${errText}` });
+        sendSSE({
+          event: 'error',
+          code: 'AGENT_SERVICE_ERROR',
+          retryable: pythonResponse.status >= 500,
+          message: pythonResponse.status >= 500
+            ? 'AI 服务暂时不可用，请稍后重试。'
+            : `AI 处理失败: ${errText}`,
+        });
         res.end();
-        releaseActiveSlot();
+        finishStream();
         return;
       }
 
@@ -589,13 +805,40 @@ router.post(
             const payload = line.slice(6);
             try {
               const event = JSON.parse(payload);
+              if (event.event === 'done') pythonStreamCompleted = true;
               if (['agent_message', 'chitchat_reply', 'new_design_started'].includes(event.event) && String(event.text || '').trim()) {
-                emittedAssistantMessages.push(event.text.trim());
+                emittedAssistantMessages.push({
+                  role: 'assistant',
+                  content: event.text.trim(),
+                  agent: event.agent || 'coordinator',
+                });
               }
               if (event.event === 'clarification_needed' && Array.isArray(event.questions) && event.questions.length > 0) {
-                emittedAssistantMessages.push(
-                  `在生成之前，我想确认：\n${event.questions.map((question, index) => `${index + 1}. ${question}`).join('\n')}`
+                emittedAssistantMessages.push({
+                  role: 'assistant',
+                  agent: event.agent || 'requirement_collector',
+                  content: `在生成之前，我想确认：\n${event.questions.map((question, index) => `${index + 1}. ${question}`).join('\n')}`,
+                });
+              }
+              if (event.event === 'agent_tool_start' && event.tool) {
+                emittedAssistantMessages.push({
+                  role: 'status',
+                  agent: 'react_agent',
+                  type: 'agent_status',
+                  content: agentToolStatusText(event.tool),
+                });
+              }
+              if (event.event === 'info_complete') {
+                const lastAssistant = [...(event.chat_history || [])].reverse().find(
+                  (turn) => turn?.role === 'assistant' && String(turn.content || '').trim()
                 );
+                if (lastAssistant) {
+                  emittedAssistantMessages.push({
+                    role: 'assistant',
+                    agent: 'planner',
+                    content: String(lastAssistant.content).trim(),
+                  });
+                }
               }
               // Track phase info for DB update
               if (event.event === 'phase_complete') {
@@ -640,6 +883,13 @@ router.post(
                 };
               } else if (event.event === 'error') {
                 fullResult = { ...fullResult, error: event.message };
+                if (String(event.message || '').trim()) {
+                  emittedAssistantMessages.push({
+                    role: 'assistant',
+                    agent: 'coordinator',
+                    content: `生成未完成：${event.message.trim()}`,
+                  });
+                }
               } else if (event.event === 'tool_call') {
                 // Store pending tool call for tracking
                 const pendingTools = session.pending_tool_calls || [];
@@ -689,6 +939,19 @@ router.post(
       // 处理 buffer 中剩余数据
       if (buffer.startsWith('data: ') && !sseEnded) {
         res.write(buffer + '\n');
+        try {
+          const finalEvent = JSON.parse(buffer.slice(6));
+          if (finalEvent.event === 'done') pythonStreamCompleted = true;
+        } catch {}
+      }
+
+      if (!pythonStreamCompleted && !sseEnded) {
+        sendSSE({
+          event: 'error',
+          code: 'AGENT_STREAM_INTERRUPTED',
+          retryable: true,
+          message: 'Agent 连接中断，已保留当前结果，请重试本次操作。',
+        });
       }
 
       // 下载并持久化生成的图片
@@ -705,7 +968,11 @@ router.post(
         // 并行下载所有图片
         const downloadTasks = imageTypeEntries.map(async ([imgType, imgUrl]) => {
           console.log(`[Agent SSE] Downloading [${imgType}]: ${imgUrl}`);
-          const imgFetch = await fetch(imgUrl, { signal: AbortSignal.timeout(30_000) });
+          const imgFetch = await fetchWithRetries(imgUrl, {}, {
+            attempts: 3,
+            timeoutMs: 30_000,
+            retryNetwork: () => true,
+          });
           if (!imgFetch.ok) {
             throw new Error(`Download failed: HTTP ${imgFetch.status}`);
           }
@@ -748,20 +1015,19 @@ router.post(
         const nextPhase = fullResult.current_phase || 'COLLECTING_INFO';
         const lastParams = {
           ...previousParams,
-          product_name: fullResult.product_name || previousParams.product_name || '',
-          selling_points: fullResult.selling_points || previousParams.selling_points || '',
-          image_types: fullResult.image_types || previousParams.image_types || [],
+          product_name: fullResult.product_name || fullResult.agent_memory?.product_name || previousParams.product_name || '',
+          selling_points: fullResult.selling_points || fullResult.agent_memory?.selling_points || previousParams.selling_points || '',
+          image_types: fullResult.image_types || fullResult.agent_memory?.image_types || previousParams.image_types || [],
           current_images: fullResult.current_images || previousParams.current_images || {},
-          style_preference: fullResult.style_preference || previousParams.style_preference || '',
-          aspect_ratio: fullResult.aspect_ratio || previousParams.aspect_ratio || '1:1',
+          style_preference: fullResult.style_preference || fullResult.agent_memory?.style_preference || previousParams.style_preference || '',
+          aspect_ratio: fullResult.aspect_ratio || fullResult.agent_memory?.aspect_ratio || previousParams.aspect_ratio || '1:1',
           product_image_url: restoredProductImage.imageUrl || previousParams.product_image_url || '',
         };
 
         // 持久化 chat_history（Phase 1 完成后的完整对话上下文）
-        const pipelineHistory = mergeConversationHistory(previousHistory, fullResult.chat_history);
         const nextChatHistory = appendConversationTurns(
-          pipelineHistory,
-          message,
+          durableRequestHistory,
+          '',
           emittedAssistantMessages
         );
 
@@ -772,7 +1038,17 @@ router.post(
 
         await pool.query(
           'UPDATE doubao_agent_sessions SET current_state = $1, chat_history = $2, last_params = $3, agent_memory = $4, title = $5, updated_at = CURRENT_TIMESTAMP WHERE session_id = $6 AND uid = $7',
-          [nextPhase, JSON.stringify(nextChatHistory), JSON.stringify(lastParams), JSON.stringify(fullResult.agent_memory || agentMemory), nextTitle, currentSessionId, uid]
+          [nextPhase, JSON.stringify(nextChatHistory), JSON.stringify(lastParams), JSON.stringify(fullResult.agent_memory || requestAgentMemory), nextTitle, currentSessionId, uid]
+        );
+      } else if (emittedAssistantMessages.length > 0) {
+        const nextChatHistory = appendConversationTurns(
+          durableRequestHistory,
+          '',
+          emittedAssistantMessages,
+        );
+        await pool.query(
+          'UPDATE doubao_agent_sessions SET chat_history = $1, updated_at = CURRENT_TIMESTAMP WHERE session_id = $2 AND uid = $3',
+          [JSON.stringify(nextChatHistory), currentSessionId, uid]
         );
       }
 
@@ -782,18 +1058,65 @@ router.post(
         imagesMap[img.type] = img.url;
       }
       if (Object.keys(imagesMap).length > 0) {
+        // Persist generated layers server-side before notifying the browser.
+        // This survives refreshes and client disconnects before the canvas PUT.
+        const canvasResult = await pool.query(
+          'SELECT canvas_state FROM doubao_agent_sessions WHERE session_id = $1 AND uid = $2',
+          [currentSessionId, uid]
+        );
+        const durableAssets = localImageUrls.map((image) => ({
+          id: `${currentSessionId}-${image.type}-${crypto.randomUUID()}`,
+          name: `Agent_${image.type}_${fullResult?.product_name?.substring(0, 12) || '设计'}`,
+          url: image.url,
+          source: 'ai_generated',
+          metrics: { image_type: image.type },
+        }));
+        const recoveredCanvas = recoverCanvasFromAssets(
+          canvasResult.rows[0]?.canvas_state || {},
+          durableAssets,
+        );
+        if (recoveredCanvas.recoveredCount > 0) {
+          await pool.query(
+            'UPDATE doubao_agent_sessions SET canvas_state = $1 WHERE session_id = $2 AND uid = $3',
+            [JSON.stringify(recoveredCanvas.canvasState), currentSessionId, uid]
+          );
+        }
         sendSSE({ event: 'images_saved', images: imagesMap, remainingCredits });
       }
 
       res.end();
-      releaseActiveSlot();
+      finishStream();
     } catch (err) {
       console.error('[Agent SSE] Stream error:', err.message);
+      const unavailable = isConnectivityError(err);
+      const failureMessage = unavailable
+        ? '生成未完成：AI 引擎正在恢复连接，请稍后重试。'
+        : '生成未完成：Agent 执行暂时失败，当前会话已保留，请重试。';
+      try {
+        const failureHistory = appendConversationTurns(
+          durableRequestHistory,
+          '',
+          [...emittedAssistantMessages, failureMessage],
+        );
+        await pool.query(
+          'UPDATE doubao_agent_sessions SET chat_history = $1, updated_at = CURRENT_TIMESTAMP WHERE session_id = $2 AND uid = $3',
+          [JSON.stringify(failureHistory), currentSessionId, uid]
+        );
+      } catch (historyError) {
+        console.error('[Agent SSE] Failed to persist error turn:', historyError.message);
+      }
       if (!sseEnded) {
-        sendSSE({ event: 'error', message: err.message });
+        sendSSE({
+          event: 'error',
+          code: unavailable ? 'AGENT_SERVICE_UNAVAILABLE' : 'AGENT_STREAM_FAILED',
+          retryable: true,
+          message: unavailable
+            ? 'AI 引擎正在恢复连接，请稍后重试。'
+            : 'Agent 执行暂时失败，当前会话已保留，请重试。',
+        });
         res.end();
       }
-      releaseActiveSlot();
+      finishStream();
     }
   })
 );
@@ -939,7 +1262,7 @@ router.post(
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           current_phase: previousState,
-          chat_history: previousHistory,
+          chat_history: toModelConversationHistory(previousHistory),
           message: message,
           product_name: previousParams.product_name || '',
           selling_points: previousParams.selling_points || '',

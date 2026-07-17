@@ -1,0 +1,49 @@
+{
+  "canvas_id": "canvas_军事士兵人",
+  "size": {
+    "width": 1920,
+    "height": 1920
+  },
+  "layers": [
+    {
+      "id": "b8a56046",
+      "type": "subject",
+      "z_index": 1,
+      "bbox": {
+        "x": 0.0,
+        "y": 0.0,
+        "width": 1920.0,
+        "height": 1920.0
+      },
+      "asset_ref": "https://ark-acg-cn-beijing.tos-cn-beijing.volces.com/doubao-seedream-5-0/021784191476646dd4f59ce804f9f0c9fccaca707589494509237_0.jpeg?X-Tos-Algorithm=TOS4-HMAC-SHA256&X-Tos-Credential=REDACTED_ACCESS_KEY-beijing%2Ftos%2Frequest&X-Tos-Date=20260716T084527Z&X-Tos-Expires=86400&X-Tos-Signature=0ed7d0a486e259028c3f4c28a80b872d5380c9d2d8823af33f8552e6e984d7de&X-Tos-SignedHeaders=host",
+      "prompt_used": "IMAGE 1 is the authoritative NEW PRODUCT. Preserve its exact identity, shape, proportions, colors, materials and details. IMAGE 2 is STYLE-ONLY: borrow palette, lighting, composition rhythm, background treatment and mood, but never copy its product, logo, trademark, text or distinctive props. The final image must feature only IMAGE 1's product. Product: 军事士兵人. Transferable style: dominant_colors: #F5F5F0, #D4AF37, #8B4513, #FFFFFF, #333333; lighting: Soft, diffused studio lighting creating a clean and bright atmosphere with minimal shadows, emphasizing product clarity and premium texture.; composition: Centered hierarchical layout with a prominent headline at the top, a horizontal product lineup in the middle ground, and a clear call-to-action banner at the bottom. Informational tags are distributed around products with connecting lines.; background: Textured off-white background resembling embossed plaster or classical architectural molding, adding a subtle sense of depth and European elegance without distracting from the foreground.; mood: Professional, elegant, clinical yet luxurious, trustworthy, and clean.; typography: Mix of elegant serif fonts for headlines (often in gold/bronze) and clean sans-serif fonts for body text and product details. High contrast between main titles and secondary information.; decorative_elements: Rounded capsule-shaped labels for product specifications, Vertical side tab for navigation instructions, Connecting lines and dots linking products to descriptions, Gold/bronze accent banners and price tags, Subtle architectural relief patterns in the background. Create a premium square e-commerce hero main image, strong product focus, clean hierarchy, no copied text or logos.",
+      "style_tags": [],
+      "status": "ready",
+      "metadata": {}
+    },
+    {
+      "id": "729a8141",
+      "type": "subject",
+      "z_index": 2,
+      "bbox": {
+        "x": 0.0,
+        "y": 0.0,
+        "width": 1920.0,
+        "height": 1920.0
+      },
+      "asset_ref": "https://ark-acg-cn-beijing.tos-cn-beijing.volces.com/doubao-seedream-5-0/021784191476637ebd7c24e3cae4a4b683f52566c3e30e257918e_0.jpeg?X-Tos-Algorithm=TOS4-HMAC-SHA256&X-Tos-Credential=REDACTED_ACCESS_KEY-beijing%2Ftos%2Frequest&X-Tos-Date=20260716T084523Z&X-Tos-Expires=86400&X-Tos-Signature=95e172279941333cc8049e2a81e10c58b27f06506cdad2a58b04b104a4b0c90b&X-Tos-SignedHeaders=host",
+      "prompt_used": "IMAGE 1 is the authoritative NEW PRODUCT. Preserve its exact identity, shape, proportions, colors, materials and details. IMAGE 2 is STYLE-ONLY: borrow palette, lighting, composition rhythm, background treatment and mood, but never copy its product, logo, trademark, text or distinctive props. The final image must feature only IMAGE 1's product. Product: 军事士兵人. Transferable style: dominant_colors: #F5F5F0, #D4AF37, #8B4513, #FFFFFF, #333333; lighting: Soft, diffused studio lighting creating a clean and bright atmosphere with minimal shadows, emphasizing product clarity and premium texture.; composition: Centered hierarchical layout with a prominent headline at the top, a horizontal product lineup in the middle ground, and a clear call-to-action banner at the bottom. Informational tags are distributed around products with connecting lines.; background: Textured off-white background resembling embossed plaster or classical architectural molding, adding a subtle sense of depth and European elegance without distracting from the foreground.; mood: Professional, elegant, clinical yet luxurious, trustworthy, and clean.; typography: Mix of elegant serif fonts for headlines (often in gold/bronze) and clean sans-serif fonts for body text and product details. High contrast between main titles and secondary information.; decorative_elements: Rounded capsule-shaped labels for product specifications, Vertical side tab for navigation instructions, Connecting lines and dots linking products to descriptions, Gold/bronze accent banners and price tags, Subtle architectural relief patterns in the background. Create a square selling-point image with clear visual callouts for: 经典军事造型，细节刻画丰富，配套武器配件，静态展示摆件. Use concise original Chinese copy only when legible.",
+      "style_tags": [],
+      "status": "ready",
+      "metadata": {}
+    }
+  ],
+  "global_style": {
+    "primary_color": null,
+    "light_direction": null,
+    "mood": null,
+    "background_type": null
+  },
+  "version": 3,
+  "parent_version": null
+}

@@ -4,7 +4,9 @@ import * as Accordion from '@radix-ui/react-accordion';
 import './InfiniteCanvas.css';
 import ProductAnalysisCard from './ProductAnalysisCard';
 import { composeImageWithRegions, createImageEditRegion } from '../lib/regionEdit';
-import { isReferenceCanvasImage } from '../lib/canvasImages';
+import { getCanvasMaterialImages } from '../lib/canvasImages';
+import { stripAttachmentRoutingFromDisplay } from '../lib/imageAgentRouting';
+import { createExportDownload, inlineSvgImageSources, retainSvgCluster } from '../lib/svgExport';
 
 const AGENT_CONFIGS = {
   orchestrator: { name: '编排助手', color: 'var(--primary)' },
@@ -31,8 +33,39 @@ const STITCH_COLORS = [
 
 const getStitchColor = (index) => STITCH_COLORS[index % STITCH_COLORS.length];
 
-const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelity, isGenerating, setIsGenerating, onImportImageAsset, autoCutout = true, setAutoCutout, processCutout, chatMessages = [], isTyping = false, onRecommendationAction, evalModel = 'eval_standard', onSendMessage, chatInputValue, onInputValueChange, currentSessionId, saveCanvasState, initialCanvasState, onAttachImageToChat, attachedImages = [], onRemoveAttachedImage, onAddStyleReference, onImageAdded, onConfirmProductAnalysis, onRetryProductAnalysis, isConfirmingProductAnalysis = false }, ref) => {
+const ChatAttachmentPreview = ({ image, resolveUrl }) => {
+  const [failed, setFailed] = useState(false);
+  const label = image.kind === 'region_edit'
+    ? '框选图'
+    : image.role === 'style_reference'
+      ? '风格参考图'
+      : '图片';
+
+  return (
+    <div className={`sidebar-msg__attachment-preview${failed ? ' sidebar-msg__attachment-preview--failed' : ''}`}>
+      {failed ? (
+        <div className="sidebar-msg__attachment-fallback" title="图片加载失败">
+          <ImageIcon size={18} />
+          <small>加载失败</small>
+        </div>
+      ) : (
+        <img
+          src={resolveUrl(image.url)}
+          alt={image.name || label}
+          className="sidebar-msg__attachment-thumb"
+          onError={() => setFailed(true)}
+        />
+      )}
+      <span>{label}</span>
+    </div>
+  );
+};
+
+const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelity, isGenerating, setIsGenerating, onImportImageAsset, autoCutout = true, setAutoCutout, processCutout, chatMessages = [], isTyping = false, typingStatus = 'Agent 正在处理…', onRecommendationAction, evalModel = 'eval_standard', onSendMessage, chatInputValue, onInputValueChange, currentSessionId, saveCanvasState, initialCanvasState, onAttachImageToChat, attachedImages = [], onRemoveAttachedImage, onAddStyleReference, onImageAdded, onConfirmProductAnalysis, onRetryProductAnalysis, isConfirmingProductAnalysis = false }, ref) => {
   const [camera, setCamera] = useState(() => {
+    if (initialCanvasState?._session_id === currentSessionId && initialCanvasState.camera) {
+      return initialCanvasState.camera;
+    }
     try {
       const saved = localStorage.getItem('infinite_canvas_camera');
       return saved ? JSON.parse(saved) : { x: 100, y: 80, zoom: 1.0 };
@@ -43,6 +76,9 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
   });
 
   const [elements, setElements] = useState(() => {
+    if (initialCanvasState?._session_id === currentSessionId && Array.isArray(initialCanvasState.elements)) {
+      return initialCanvasState.elements;
+    }
     try {
       const saved = localStorage.getItem('infinite_canvas_elements');
       const parsed = saved ? JSON.parse(saved) : null;
@@ -69,25 +105,23 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
   const copiedElementRef = useRef(null);
   const fileInputRef = useRef(null);
   const prevSessionIdRef = useRef(currentSessionId);
+  const hydratedCanvasSessionRef = useRef(
+    initialCanvasState?._session_id === currentSessionId ? currentSessionId : null
+  );
 
   // Restore / clear canvas when switching sessions
   useEffect(() => {
     const prev = prevSessionIdRef.current;
     prevSessionIdRef.current = currentSessionId;
 
-    // Only act if sessionId actually changed (not initial mount with empty)
-    if (currentSessionId && prev !== currentSessionId) {
-      if (initialCanvasState && initialCanvasState.elements && initialCanvasState.elements.length > 0) {
-        // Restore saved canvas state from server
-        setElements(initialCanvasState.elements);
-        if (initialCanvasState.camera) {
-          setCamera(initialCanvasState.camera);
-        }
-      } else {
-        // New or empty session — clear canvas
-        setElements([]);
-        setCamera({ x: 100, y: 80, zoom: 1.0 });
-      }
+    const stateMatchesSession = currentSessionId && initialCanvasState?._session_id === currentSessionId;
+    if (stateMatchesSession) {
+      setElements(Array.isArray(initialCanvasState.elements) ? initialCanvasState.elements : []);
+      setCamera(initialCanvasState.camera || { x: 400, y: 300, zoom: 1 });
+      hydratedCanvasSessionRef.current = currentSessionId;
+    } else if (currentSessionId && prev !== currentSessionId) {
+      // Do not clear or autosave while the selected session is still loading.
+      hydratedCanvasSessionRef.current = null;
     }
   }, [currentSessionId, initialCanvasState]);
 
@@ -240,15 +274,18 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
   };
 
   const exportCanvas = async (format = 'png', scale = 1) => {
-    if (!svgRef.current) return;
+    if (!svgRef.current) throw new Error('画布尚未初始化');
 
     const clusters = getClusters();
     if (clusters.length === 0) {
-      alert('画布上没有任何元素可以导出！');
-      return;
+      throw new Error('画布上没有可导出的内容');
     }
 
-    // Process each cluster and trigger a download for each
+    const exportTimestamp = Date.now();
+    const exportedFiles = [];
+
+    // Render clusters sequentially to avoid holding several full-resolution
+    // canvases at once. The resulting files are downloaded together below.
     for (let i = 0; i < clusters.length; i++) {
       const clusterElements = clusters[i];
       
@@ -265,7 +302,9 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
         }
       });
       
-      if (minX === Infinity || minY === Infinity) continue;
+      if (minX === Infinity || minY === Infinity) {
+        throw new Error(`第 ${i + 1} 个导出分组缺少有效边界`);
+      }
       
       const padding = 15;
       const cropX = minX - padding;
@@ -278,7 +317,7 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
       
       // Get the world space container <g>
       const worldGroup = svgElement.querySelector('g[transform]');
-      if (!worldGroup) continue;
+      if (!worldGroup) throw new Error('导出画布结构不完整，请刷新后重试');
 
       // Clear camera transform so elements render at absolute coordinates
       worldGroup.setAttribute('transform', 'translate(0, 0) scale(1)');
@@ -292,15 +331,13 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
       if (handles) handles.remove();
 
       // Remove SVG elements that do not belong to the current cluster
-      const childGroups = Array.from(worldGroup.querySelectorAll('.svg-element-group'));
       const clusterIds = new Set(clusterElements.map(el => el.id));
+      retainSvgCluster(worldGroup, clusterIds);
 
-      childGroups.forEach(group => {
-        const id = group.getAttribute('id');
-        if (id && !clusterIds.has(id)) {
-          group.remove();
-        }
-      });
+      // Blob-backed SVGs cannot reliably resolve relative /uploads URLs, and
+      // remote image hrefs can taint the raster canvas. Make each export
+      // self-contained before serialization.
+      await inlineSvgImageSources(svgElement, { resolveUrl: getImageUrl });
 
       // Set viewBox and size matching the cropped area
       svgElement.setAttribute('viewBox', `${cropX} ${cropY} ${cropW} ${cropH}`);
@@ -328,33 +365,48 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
       const url = URL.createObjectURL(svgBlob);
       
       // We wrap in a promise to wait sequentially or execute immediately
-      await new Promise((resolve) => {
+      const renderedBlob = await new Promise((resolve, reject) => {
         img.onload = () => {
-          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-          URL.revokeObjectURL(url);
-          
           try {
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
             const mimeType = format === 'jpeg' ? 'image/jpeg' : 'image/png';
             const ext = format === 'jpeg' ? 'jpg' : 'png';
-            const link = document.createElement('a');
-            link.download = `canvas-export-${i + 1}-${Date.now()}.${ext}`;
-            link.href = canvas.toDataURL(mimeType, 0.95);
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
+            canvas.toBlob((blob) => {
+              if (!blob) {
+                reject(new Error(`第 ${i + 1} 个画布生成文件失败`));
+                return;
+              }
+              resolve(blob);
+            }, mimeType, 0.95);
           } catch (err) {
-            console.error("Failed to generate download URL for cluster " + i, err);
+            reject(err);
+          } finally {
+            URL.revokeObjectURL(url);
           }
-          resolve();
         };
-        img.onerror = (e) => {
-          console.error("Failed to load SVG image for cluster " + i, e);
+        img.onerror = () => {
           URL.revokeObjectURL(url);
-          resolve();
+          reject(new Error(`第 ${i + 1} 个画布栅格化失败`));
         };
         img.src = url;
       });
+      const ext = format === 'jpeg' ? 'jpg' : 'png';
+      exportedFiles.push({
+        blob: renderedBlob,
+        name: `canvas-export-${String(i + 1).padStart(2, '0')}.${ext}`,
+      });
     }
+
+    const download = await createExportDownload(exportedFiles, { timestamp: exportTimestamp });
+    const downloadUrl = URL.createObjectURL(download.blob);
+    const link = document.createElement('a');
+    link.download = download.filename;
+    link.href = downloadUrl;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+    return exportedFiles.length;
   };
 
   const bringToFront = (id) => {
@@ -1003,6 +1055,7 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
   }, [camera]);
 
   useEffect(() => {
+    if (!currentSessionId || hydratedCanvasSessionRef.current !== currentSessionId) return;
     try {
       localStorage.setItem('infinite_canvas_elements', JSON.stringify(elements));
     } catch (err) {
@@ -1010,12 +1063,12 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
     }
     // Debounced server-side save (elements + camera together)
     const timer = setTimeout(() => {
-      if (currentSessionId && saveCanvasState) {
+      if (saveCanvasState && hydratedCanvasSessionRef.current === currentSessionId) {
         saveCanvasState(currentSessionId, { elements, camera: cameraRef.current });
       }
     }, 2000);
     return () => clearTimeout(timer);
-  }, [elements]);
+  }, [elements, currentSessionId, saveCanvasState]);
 
   // Prevent default browser zoom/scroll for wheel events on the canvas
   useEffect(() => {
@@ -2093,7 +2146,7 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
             const selectStyle = isSelected ? { stroke: '#ff6b35', strokeWidth: Math.max(1.5, 2.5 / camera.zoom) } : {};
 
             return (
-              <g key={el.id} className="svg-element-group">
+              <g key={el.id} className="svg-element-group" data-element-id={el.id}>
                 {el.type === 'pen' && (
                   <path
                     d={getSvgPathString(el.points)}
@@ -2867,7 +2920,7 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
             }
 
             return (
-              <div key={index} className={`sidebar-msg ${isAi ? 'sidebar-msg--ai' : 'sidebar-msg--user'}`}>
+              <div key={msg.id || index} className={`sidebar-msg ${isAi ? 'sidebar-msg--ai' : 'sidebar-msg--user'}`}>
                 {isAi && (
                   <span className="sidebar-msg__agent" style={{ color: agentInfo.color }}>
                     {agentInfo.name}
@@ -2877,11 +2930,15 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
                   {msg.images && msg.images.length > 0 && (
                     <div className="sidebar-msg__attachments">
                       {msg.images.map((img, i) => (
-                        <img key={i} src={getImageUrl(img.url)} alt={img.name} className="sidebar-msg__attachment-thumb" />
+                        <ChatAttachmentPreview
+                          key={img.id || i}
+                          image={img}
+                          resolveUrl={getImageUrl}
+                        />
                       ))}
                     </div>
                   )}
-                  {msg.text}
+                  {isAi ? msg.text : stripAttachmentRoutingFromDisplay(msg.text)}
                   {msg.recommendation && (
                     <div className="sidebar-msg__reco">
                       <div className="sidebar-msg__reco-header">
@@ -2903,6 +2960,7 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
           {isTyping && (
             <div className="sidebar-msg sidebar-msg--ai">
               <div className="sidebar-msg__bubble sidebar-msg__typing">
+                <span style={{ marginRight: 8 }}>{typingStatus}</span>
                 <span className="typing-dot" />
                 <span className="typing-dot" />
                 <span className="typing-dot" />
@@ -2984,7 +3042,11 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
                 {attachedImages.map(img => (
                   <div key={img.id} className="attachment-chip">
                     <img src={getImageUrl(img.url)} alt={img.name || '附件'} />
-                    <span className="attachment-chip-name">{img.role === 'style_reference' ? '风格参考 · ' : ''}{img.name || '图片'}</span>
+                    <span className="attachment-chip-name">
+                      {img.kind === 'region_edit' ? '框选图 · ' : img.role === 'style_reference' ? '风格参考 · ' : ''}
+                      {img.name || '图片'}
+                      {img.upload_status === 'uploading' ? '（上传中）' : ''}
+                    </span>
                     <button
                       className="attachment-chip-remove"
                       onClick={() => onRemoveAttachedImage?.(img.id)}
@@ -3100,7 +3162,7 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
                     </button>
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px', maxHeight: '140px', overflowY: 'auto' }}>
-                    {elements.filter(isReferenceCanvasImage).map((el, idx) => (
+                    {getCanvasMaterialImages(elements).map((el, idx) => (
                       <div
                         key={el.id}
                         style={{ position: 'relative', borderRadius: '6px', overflow: 'hidden', border: selectedId === el.id ? '2px solid var(--primary)' : '1px solid rgba(255, 255, 255, 0.1)', aspectRatio: '1', cursor: 'pointer', background: 'rgba(0,0,0,0.2)' }}
@@ -3115,6 +3177,14 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
                         title={el.name || `图片-${idx + 1}`}
                       >
                         <img src={getImageUrl(el.url)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} alt="" />
+                        {(el.source === 'ai_generated' || el.isGenerated) && (
+                          <span style={{
+                            position: 'absolute', left: 3, top: 3,
+                            padding: '1px 4px', borderRadius: 3,
+                            background: 'rgba(41, 98, 255, 0.9)', color: '#fff',
+                            fontSize: '0.55rem', fontWeight: 700,
+                          }}>AI</span>
+                        )}
                         {selectedId === el.id && (
                           <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, background: 'rgba(30,30,30,0.9)', display: 'flex', justifyContent: 'space-around', padding: '3px 0', borderTop: '1px solid rgba(255,255,255,0.1)' }}>
                             <button onClick={(e) => { e.stopPropagation(); moveForward(el.id); }} style={{ background: 'none', border: 'none', color: '#fff', cursor: 'pointer', padding: '2px', display: 'flex', alignItems: 'center' }} title="上移一层"><ChevronUp size={11} /></button>
@@ -3129,9 +3199,9 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
                         >✕</button>
                       </div>
                     ))}
-                    {elements.filter(isReferenceCanvasImage).length === 0 && (
+                    {getCanvasMaterialImages(elements).length === 0 && (
                       <div style={{ gridColumn: 'span 3', color: 'var(--text-secondary)', fontSize: '0.65rem', textAlign: 'center', padding: '12px 0', opacity: 0.7 }}>
-                        暂无已上传的样板图片
+                        暂无画布图片
                       </div>
                     )}
                   </div>

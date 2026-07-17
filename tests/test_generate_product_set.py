@@ -29,3 +29,27 @@ def test_product_set_uses_product_reference_and_only_requested_types(monkeypatch
     assert all(call["reference_images"] == ["data:image/png;base64,PRODUCT"] for call in calls)
     assert calls[0]["aspect_ratio"] == "1:1"
     assert calls[1]["aspect_ratio"] == "3:4"
+    assert calls[1]["size_doubao"] == "1728x2304"
+
+
+def test_product_set_rejects_missing_types_instead_of_generating_all(monkeypatch):
+    calls = []
+
+    async def fake_generate(params, _canvas):
+        calls.append(params.model_extra)
+        return ActionResult(success=True, data={"url": "https://example.test/unexpected.png"})
+
+    monkeypatch.setattr(module, "generate_layer_fn", fake_generate)
+    result = asyncio.run(module.generate_product_set_fn(
+        module.ActionParams(
+            action="generate_product_set",
+            product_image="data:image/png;base64,PRODUCT",
+            image_types=[],
+            image_model_key="test",
+        ),
+        CanvasState(canvas_id="missing-product-set-types-test"),
+    ))
+
+    assert result.success is False
+    assert result.error == "未选择有效的套图类型"
+    assert calls == []

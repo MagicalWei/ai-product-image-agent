@@ -1,0 +1,33 @@
+{
+  "canvas_id": "canvas_无毒",
+  "size": {
+    "width": 1920,
+    "height": 1920
+  },
+  "layers": [
+    {
+      "id": "07b7205c",
+      "type": "subject",
+      "z_index": 1,
+      "bbox": {
+        "x": 0.0,
+        "y": 0.0,
+        "width": 1920.0,
+        "height": 1920.0
+      },
+      "asset_ref": "https://ark-acg-cn-beijing.tos-cn-beijing.volces.com/doubao-seedream-5-0/0217842088358993b744fffeb88c418a31726ba8a0f731c9e5edd_0.jpeg?X-Tos-Algorithm=TOS4-HMAC-SHA256&X-Tos-Credential=REDACTED_ACCESS_KEY-beijing%2Ftos%2Frequest&X-Tos-Date=20260716T133438Z&X-Tos-Expires=86400&X-Tos-Signature=f2616970551ff99b812255d1e125dea9ae9ee0ad1c2c618062e2e0da2db73f74&X-Tos-SignedHeaders=host",
+      "prompt_used": "IMAGE 1 is the authoritative product photograph. Preserve the exact product identity, shape, proportions, colors, materials, packaging and visible details. Do not replace, redesign or invent product features. Product: 无毒. Visual style: french_vintage. Create a vertical A+/detail-page image with structured sections, close-up visual storytelling and product benefits: 无毒，超安全.",
+      "style_tags": [],
+      "status": "ready",
+      "metadata": {}
+    }
+  ],
+  "global_style": {
+    "primary_color": null,
+    "light_direction": null,
+    "mood": null,
+    "background_type": null
+  },
+  "version": 2,
+  "parent_version": null
+}

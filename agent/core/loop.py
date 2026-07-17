@@ -22,6 +22,11 @@ from typing import Any, AsyncGenerator
 from agent.actions.registry import ActionHandler, get_action, list_actions
 from agent.canvas.state import CanvasStateManager
 from agent.canvas.version_tree import VersionTree
+from agent.image_routing import (
+    build_seedream_edit_prompt,
+    is_attachment_receipt_question,
+    parse_direct_image_request,
+)
 from agent.models import (
     ActionParams,
     ActionResult,
@@ -39,6 +44,14 @@ logger = logging.getLogger(__name__)
 MAX_RETRIES_PER_ACTION = 2
 MAX_ITERATIONS = 10
 WARNING_THRESHOLD = 8
+
+
+def _usable_model_config(config: dict[str, Any]) -> bool:
+    return bool(
+        str(config.get("api_key") or "").strip()
+        and str(config.get("base_url") or "").strip()
+        and str(config.get("model") or "").strip()
+    )
 
 
 class SenseDecideActReviewLoop:
@@ -65,6 +78,31 @@ class SenseDecideActReviewLoop:
         self._vision_config = vision_config
         self._image_config = image_config or {}
         self._multimodal_config = multimodal_config or vision_config
+        self._review_config = (
+            vision_config if vision_config.get("api_key") else self._multimodal_config
+        )
+
+    def _chat_fallback_chain(self, configured: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Return usable, deduplicated fallbacks including the working VLM endpoint."""
+        candidates = [*configured]
+        if _usable_model_config(self._multimodal_config):
+            candidates.append({
+                "protocol": "openai",
+                "api_key": self._multimodal_config.get("api_key", ""),
+                "base_url": self._multimodal_config.get("base_url", ""),
+                "model": self._multimodal_config.get("model", ""),
+            })
+        seen: set[tuple[str, str]] = set()
+        result: list[dict[str, Any]] = []
+        for config in candidates:
+            if not _usable_model_config(config):
+                continue
+            identity = (str(config.get("base_url")), str(config.get("model")))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            result.append({**config, "timeout_seconds": 20, "retry_attempts": 1})
+        return result
 
     # ================================================================
     # Public API
@@ -75,6 +113,7 @@ class SenseDecideActReviewLoop:
         message: str,
         memory: Any,  # AgentMemory
         product_image_base64: str = "",
+        reference_images: list[str] | None = None,
         style_reference_images: list[str] | None = None,
         style_transfer_mode: bool = False,
         product_set_mode: bool = False,
@@ -99,190 +138,76 @@ class SenseDecideActReviewLoop:
             session_id = getattr(memory, "product_name", "") or f"mem_{id(memory)}"
             cid = f"canvas_{session_id}"
         canvas = self._canvas.get_or_create(cid)
+        direct_image_request, region_edit_requested, clean_message = parse_direct_image_request(message)
+        clean_message = clean_message or message
+        reference_images = reference_images or []
         style_reference_images = style_reference_images or []
+        direct_edit_references = list(dict.fromkeys(
+            image for image in reference_images if image
+        ))
+        if direct_image_request and not direct_edit_references and product_image_base64:
+            direct_edit_references = [product_image_base64]
+        style_reference_candidates = list(dict.fromkeys([
+            *style_reference_images,
+            *[
+                image for image in reference_images
+                if image and image != product_image_base64 and not region_edit_requested
+            ],
+        ]))
+
+        # pipeline.py records the raw turn before architecture dispatch. Keep
+        # memory user-visible and prevent internal routing markers from being
+        # replayed into later LLM calls.
+        if getattr(memory, "recent_chat", None):
+            last_turn = memory.recent_chat[-1]
+            if last_turn.get("role") == "user" and last_turn.get("content") == message:
+                last_turn["content"] = clean_message
 
         # Hydrate CanvasState from AgentMemory (existing layers/images)
         _hydrate_canvas_from_memory(canvas, memory, self._canvas, cid)
 
-        # A composer attachment is an explicit generation/edit command. Route
-        # it straight to the image action so the Agent never asks requirement
-        # questions or treats the image as analysis-only input.
-        from agent.image_routing import (
-            build_seedream_edit_prompt,
-            parse_direct_image_request,
-        )
-
-        direct_image_agent, region_edit, clean_message = parse_direct_image_request(message)
-        if style_transfer_mode and product_image_base64 and style_reference_images:
-            yield {"event": "agent_thinking", "phase": "style_analysis", "iteration": 0}
-            handler = get_action("style_transfer_batch")
-            result = await handler(ActionParams(
-                action="style_transfer_batch",
-                product_image=product_image_base64,
-                style_reference_images=style_reference_images,
-                product_name=getattr(memory, "product_name", ""),
-                selling_points=getattr(memory, "selling_points", ""),
-                image_model_key=self._image_config.get("api_key", ""),
-                negative_prompt=getattr(memory, "negative_prompt", ""),
-                multimodal_config=self._multimodal_config,
-            ), canvas)
-            if not result.success:
-                yield {"event": "error", "message": f"风格迁移失败: {result.error}"}
-                yield {"event": "done"}
-                return
-            images = result.data.get("images", {})
-            prompts = result.data.get("prompts", {})
-            expected_types = ["main", "selling_point", "detail"]
-            missing_types = [image_type for image_type in expected_types if image_type not in images]
-            for image_type, image_url in images.items():
-                canvas = self._canvas.create_layer(
-                    cid, layer_type="subject", asset_ref=image_url,
-                    prompt_used=prompts.get(image_type, ""), status="ready",
-                )
-                if hasattr(memory, "record_generation"):
-                    memory.record_generation(image_type, prompts.get(image_type, ""), image_url, 0)
-                yield {"event": "image_progress", "image_type": image_type, "url": image_url, "prompt": prompts.get(image_type, "")}
-            memory.image_types = ["main", "selling_point", "detail"]
-            memory.reference_images_intent = "style_transfer"
-            memory.vlm_style_analysis = result.data.get("style_analysis") or None
-            memory.add_chat_turn("assistant", "已按参考图风格生成主图、卖点图和详情图。")
-            _sync_canvas_to_memory(canvas, memory)
-            warning = f"以下图片生成失败，请重试：{', '.join(missing_types)}" if missing_types else ""
-            yield {"event": "image_done", "all_images": images, "all_prompts": prompts, "average_scores": {}, "warning": warning}
-            message_text = (
-                "已完成风格迁移套图：主图、卖点图、详情图。"
-                if not missing_types else
-                f"已生成 {len(images)}/3 张；{', '.join(missing_types)} 生成失败，可点击生成风格套图重试。"
+        # UI modes are observations for the Agent, never execution switches.
+        # The DECIDE phase remains the only place that may choose an Action.
+        request_hints = {
+            "product_set_requested": bool(product_set_mode),
+            "style_transfer_requested": bool(style_transfer_mode),
+            "has_product_image": bool(product_image_base64),
+            "has_style_reference": bool(style_reference_images),
+            "has_untyped_reference": bool(reference_images),
+            "reference_attachment_count": len(style_reference_candidates),
+            "direct_image_request": direct_image_request,
+            "region_edit_requested": region_edit_requested,
+            "edit_reference_count": len(direct_edit_references),
+        }
+        received_references = list(dict.fromkeys([
+            *style_reference_images,
+            *reference_images,
+        ]))
+        if received_references:
+            logger.info(
+                "[Agent Reference] received explicit_style=%s untyped=%s total=%s",
+                len(style_reference_images),
+                len(reference_images),
+                len(received_references),
             )
-            yield {"event": "agent_message", "agent": "agent", "text": message_text}
-            yield {"event": "memory_updated", "agent_memory": memory.to_dict()}
-            yield {"event": "done"}
-            return
-        if product_set_mode and product_image_base64:
-            requested_types = [
-                image_type for image_type in (getattr(memory, "image_types", []) or ["main", "selling_point", "detail"])
-                if image_type in {"main", "selling_point", "detail"}
-            ]
-            yield {"event": "agent_thinking", "phase": "product_set_generation", "iteration": 0}
-            handler = get_action("generate_product_set")
-            result = await handler(ActionParams(
-                action="generate_product_set",
-                product_image=product_image_base64,
-                image_types=requested_types,
-                product_name=getattr(memory, "product_name", ""),
-                selling_points=getattr(memory, "selling_points", ""),
-                style_preference=getattr(memory, "style_preference", ""),
-                image_model_key=self._image_config.get("api_key", ""),
-                negative_prompt=getattr(memory, "negative_prompt", ""),
-            ), canvas)
-            if not result.success:
-                yield {"event": "error", "message": f"商品套图生成失败: {result.error}"}
-                yield {"event": "done"}
-                return
-            images = result.data.get("images", {})
-            prompts = result.data.get("prompts", {})
-            missing_types = [image_type for image_type in requested_types if image_type not in images]
-            for image_type, image_url in images.items():
-                canvas = self._canvas.create_layer(
-                    cid, layer_type="subject", asset_ref=image_url,
-                    prompt_used=prompts.get(image_type, ""), status="ready",
-                )
-                if hasattr(memory, "record_generation"):
-                    memory.record_generation(image_type, prompts.get(image_type, ""), image_url, 0)
-                yield {"event": "image_progress", "image_type": image_type, "url": image_url, "prompt": prompts.get(image_type, "")}
-            memory.image_types = requested_types
-            memory.add_chat_turn("assistant", f"已生成 {len(images)} 张商品图片。")
-            _sync_canvas_to_memory(canvas, memory)
-            warning = f"以下图片生成失败，请重试：{', '.join(missing_types)}" if missing_types else ""
-            yield {"event": "image_done", "all_images": images, "all_prompts": prompts, "average_scores": {}, "warning": warning}
             yield {
-                "event": "agent_message", "agent": "agent",
-                "text": f"已完成商品图片生成（{len(images)}/{len(requested_types)} 张）。" + (f" 未完成：{', '.join(missing_types)}。" if missing_types else ""),
-            }
-            yield {"event": "memory_updated", "agent_memory": memory.to_dict()}
-            yield {"event": "done"}
-            return
-        if direct_image_agent and product_image_base64:
-            from agent.intent.safety_filter import safety_check
-
-            yield {"event": "agent_thinking", "phase": "sense", "iteration": 0}
-            safety_result = await safety_check(clean_message)
-            if not safety_result.passed:
-                yield {
-                    "event": "error",
-                    "message": f"内容安全检查未通过: {safety_result.blocked_reason}",
-                }
-                yield {"event": "done"}
-                return
-
-            prompt = build_seedream_edit_prompt(clean_message, region_edit=region_edit)
-            yield {
-                "event": "agent_thinking",
-                "phase": "image_generator",
-                "iteration": 1,
-                "agent_role": "image_generator",
-            }
-            yield {
-                "event": "agent_tool_start",
-                "tool": "generate_layer",
-                "args": {"layer_type": "subject", "prompt": prompt},
-                "iteration": 1,
+                "event": "reference_received",
+                "explicit_style_count": len(style_reference_images),
+                "untyped_count": len(reference_images),
+                "total_count": len(received_references),
             }
 
-            handler = get_action("generate_layer")
-            direct_action_config = {
-                "layer_type": "subject",
-                "prompt": prompt,
-                "style_tags": [],
-                "image_model_key": self._image_config.get("api_key", ""),
-                "aspect_ratio": getattr(memory, "aspect_ratio", "1:1"),
-                "negative_prompt": getattr(memory, "negative_prompt", ""),
-                "size_doubao": self._image_config.get("size", "1920x1920"),
-                "reference_images": [product_image_base64],
-            }
-            action_params = ActionParams(
-                action="generate_layer",
-                **direct_action_config,
+        if direct_image_request and direct_edit_references and is_attachment_receipt_question(clean_message):
+            image_label = "框选图" if region_edit_requested else "图片附件"
+            acknowledgment = (
+                f"已收到 {len(direct_edit_references)} 张{image_label}，"
+                "图片已进入本轮 Agent 上下文。你可以直接告诉我要修改的内容。"
             )
-            result = await handler(action_params, canvas)
-            if not result.success or not result.data.get("url"):
-                yield {
-                    "event": "error",
-                    "message": f"生图 Agent 执行失败: {result.error or '未返回图片'}",
-                }
-                yield {"event": "done"}
-                return
-
-            image_url = result.data["url"]
-            canvas = self._canvas.create_layer(
-                cid,
-                layer_type="subject",
-                asset_ref=image_url,
-                prompt_used=prompt,
-                status="ready",
-            )
-            if hasattr(memory, "record_generation"):
-                memory.record_generation("edit", prompt, image_url, 0)
-            memory.add_chat_turn("assistant", "已按附件图片执行局部修改。" if region_edit else "已按附件图片执行生图。")
+            yield {"event": "agent_message", "agent": "agent", "text": acknowledgment}
+            memory.add_chat_turn("assistant", acknowledgment)
             _sync_canvas_to_memory(canvas, memory)
-            yield {
-                "event": "image_progress",
-                "image_type": "edit",
-                "url": image_url,
-                "prompt": prompt,
-            }
-            yield {
-                "event": "image_done",
-                "all_images": {"edit": image_url},
-                "all_prompts": {"edit": prompt},
-                "average_scores": {"overall": 0.0},
-            }
-            yield {
-                "event": "agent_message",
-                "agent": "image_generator",
-                "text": "已完成框选区域修改。" if region_edit else "已根据附件图片完成生成。",
-            }
             yield {"event": "memory_updated", "agent_memory": memory.to_dict()}
+            yield {"event": "canvas_queried", "current_images": memory.current_images, "stitch_regions": memory.stitch_regions}
             yield {"event": "done"}
             return
 
@@ -291,23 +216,56 @@ class SenseDecideActReviewLoop:
         # ============================================
         yield {"event": "agent_thinking", "phase": "sense", "iteration": 0}
 
-        design_brief, enriched_ctx, clarification_needed = await self._sense(
-            message, memory, product_image_base64, rag_retriever
-        )
+        if region_edit_requested and direct_edit_references:
+            # A frame drawn by the user already supplies edit target, scope and
+            # source image. Model-based requirement extraction adds latency and
+            # can only lose authoritative UI state, so SENSE assembles the brief
+            # deterministically for this narrow interaction contract.
+            design_brief = DesignBrief(
+                subject=getattr(memory, "product_name", ""),
+                use_case=getattr(memory, "ecom_platform", "") or "ecommerce",
+                style_hint=getattr(memory, "style_preference", ""),
+                platform=getattr(memory, "ecom_platform", ""),
+                target_country=getattr(memory, "target_country", ""),
+                aspect_ratio=getattr(memory, "aspect_ratio", "1:1"),
+                image_types=getattr(memory, "image_types", []),
+                selling_points=getattr(memory, "selling_points", ""),
+                color_palette=getattr(memory, "color_palette", []),
+                raw_message=clean_message,
+                reference_image_refs=[],
+            )
+            enriched_ctx = EnrichedContext(design_brief=design_brief)
+            clarification_needed = False
+        else:
+            design_brief, enriched_ctx, clarification_needed = await self._sense(
+                clean_message, memory, product_image_base64, rag_retriever, request_hints
+            )
+
+        # An attached edit image is authoritative input. Do not ask the user to
+        # re-upload it or provide coordinates that are already encoded by the box.
+        if direct_image_request and direct_edit_references:
+            clarification_needed = False
 
         # If clarification is needed, yield questions and return
         if clarification_needed:
             from agent.intent.clarifier import generate_clarification_questions
 
-            questions = generate_clarification_questions(design_brief)
+            questions = (
+                enriched_ctx.clarification_questions
+                or generate_clarification_questions(design_brief)
+            )[:3]
+            clarification_text = "在开始之前，我需要确认几个信息：\n" + "\n".join(
+                f"{i+1}. {q}" for i, q in enumerate(questions)
+            )
             yield {
                 "event": "agent_message",
                 "agent": "agent",
-                "text": "在开始之前，我需要确认几个信息：\n" + "\n".join(
-                    f"{i+1}. {q}" for i, q in enumerate(questions)
-                ),
+                "text": clarification_text,
             }
-            memory.add_chat_turn("assistant", "需要澄清设计需求")
+            # The exact question is required to resolve short replies such as
+            # “要的/是/不用”. A generic placeholder loses the referent and
+            # forces another clarification/model round.
+            memory.add_chat_turn("assistant", clarification_text)
             _sync_canvas_to_memory(canvas, memory)
             yield {"event": "memory_updated", "agent_memory": memory.to_dict()}
             yield {"event": "canvas_queried", "current_images": memory.current_images, "stitch_regions": memory.stitch_regions}
@@ -317,7 +275,7 @@ class SenseDecideActReviewLoop:
         # Safety check
         from agent.intent.safety_filter import safety_check
 
-        safety_result = await safety_check(message)
+        safety_result = await safety_check(clean_message)
         if not safety_result.passed:
             yield {
                 "event": "error",
@@ -333,6 +291,7 @@ class SenseDecideActReviewLoop:
         all_prompts: dict[str, str] = {}
         all_evaluations: dict[str, list[dict[str, Any]]] = {}
         retry_counts: dict[str, int] = {}
+        action_failures: list[dict[str, Any]] = []
 
         iteration = 0
         last_action = ""
@@ -360,22 +319,41 @@ class SenseDecideActReviewLoop:
             # ============================================
             # PHASE 2: DECIDE
             # ============================================
-            decision = await self._decide(
-                design_brief=design_brief,
-                enriched_ctx=enriched_ctx,
-                canvas=canvas,
-                memory=memory,
-                generated_images=generated_images,
-                retry_counts=retry_counts,
-                last_action=last_action,
-                iteration=iteration,
-                product_image_base64=product_image_base64 if iteration == 1 else "",
-                has_product_image=has_product_image,
-            )
+            try:
+                decision = await self._decide(
+                    design_brief=design_brief,
+                    enriched_ctx=enriched_ctx,
+                    canvas=canvas,
+                    memory=memory,
+                    generated_images=generated_images,
+                    retry_counts=retry_counts,
+                    last_action=last_action,
+                    iteration=iteration,
+                    product_image_base64=product_image_base64 if iteration == 1 else "",
+                    has_product_image=has_product_image,
+                    request_hints=request_hints,
+                    action_failures=action_failures,
+                )
+            except Exception as error:
+                logger.error("[Agent Decide] unavailable after model fallbacks: %s", error)
+                yield {
+                    "event": "error",
+                    "code": "AGENT_DECISION_UNAVAILABLE",
+                    "retryable": True,
+                    "message": "Agent 决策模型暂时不可用，任务和画布已保留，请重试本轮。",
+                }
+                yield {"event": "memory_updated", "agent_memory": memory.to_dict()}
+                yield {"event": "done"}
+                return
 
             action_name = decision.get("action", "")
             action_params_raw = decision.get("params", {})
+            if not isinstance(action_params_raw, dict):
+                action_params_raw = {}
             reasoning = decision.get("reasoning", "")
+            if iteration == 1 and isinstance(decision.get("plan"), dict):
+                memory.design_plan = decision["plan"]
+                yield {"event": "design_plan", "design_plan": decision["plan"]}
 
             # Check if the LLM wants to finish
             if action_name == "finish" or action_name == "finish_task":
@@ -422,10 +400,14 @@ class SenseDecideActReviewLoop:
             try:
                 handler = get_action(action_name)
             except KeyError:
-                yield {
-                    "event": "error",
-                    "message": f"未知动作: {action_name}。可用: {list_actions()}",
+                failure = {
+                    "action": action_name,
+                    "error": f"未知动作，可用动作：{list_actions()}",
+                    "params": action_params_raw,
+                    "iteration": iteration,
                 }
+                action_failures.append(failure)
+                yield {"event": "action_failed", **failure, "will_retry": True}
                 continue
 
             yield {
@@ -440,6 +422,12 @@ class SenseDecideActReviewLoop:
             # ============================================
             yield {"event": "agent_thinking", "phase": "act", "iteration": iteration}
 
+            if action_name == "generate_layer" and region_edit_requested:
+                action_params_raw["prompt"] = build_seedream_edit_prompt(
+                    action_params_raw.get("prompt") or clean_message,
+                    region_edit=True,
+                )
+
             # Inject extra config into params for handlers that need it
             action_config = {
                 **action_params_raw,
@@ -448,19 +436,59 @@ class SenseDecideActReviewLoop:
                 "negative_prompt": getattr(memory, "negative_prompt", "低画质、变形肢体、模糊、水印"),
                 "size_doubao": self._image_config.get("size", "1920x1920"),
                 "rag_retriever": rag_retriever,
+                "product_image": product_image_base64,
+                "reference_images": (
+                    direct_edit_references
+                    if direct_image_request
+                    else ([product_image_base64] if product_image_base64 else [])
+                ),
+                "style_reference_images": style_reference_candidates,
+                "multimodal_config": self._multimodal_config,
+                "product_name": action_params_raw.get("product_name") or design_brief.subject,
+                "selling_points": action_params_raw.get("selling_points") or design_brief.selling_points,
+                "style_preference": action_params_raw.get("style_preference") or design_brief.style_hint,
+                "image_types": action_params_raw.get("image_types") or design_brief.image_types,
             }
             action_params = ActionParams(
                 action=action_name,
                 **{k: v for k, v in action_config.items() if k != "action"},
             )
 
-            result = await handler(action_params, canvas)
+            try:
+                result = await handler(action_params, canvas)
+            except Exception as error:
+                logger.exception("[Agent Act] action %s crashed", action_name)
+                result = ActionResult(
+                    success=False,
+                    error=f"Action execution error: {type(error).__name__}",
+                )
 
             if not result.success:
-                yield {
-                    "event": "error",
-                    "message": f"动作 {action_name} 失败: {result.error}",
+                failure = {
+                    "action": action_name,
+                    "error": result.error or "工具未返回有效结果",
+                    "params": action_params_raw,
+                    "iteration": iteration,
                 }
+                action_failures.append(failure)
+                retry_counts[action_name] = retry_counts.get(action_name, 0) + 1
+                yield {"event": "action_failed", **failure, "will_retry": True}
+                yield {
+                    "event": "agent_message",
+                    "agent": "agent",
+                    "text": "工具参数或执行结果不完整，Agent 正在根据反馈修正计划。",
+                }
+                if retry_counts[action_name] >= 3:
+                    yield {
+                        "event": "error",
+                        "code": "ACTION_REPAIR_EXHAUSTED",
+                        "retryable": True,
+                        "message": f"Agent 连续修正 {action_name} 仍未成功，任务状态已保留。",
+                    }
+                    yield {"event": "memory_updated", "agent_memory": memory.to_dict()}
+                    yield {"event": "done"}
+                    return
+                last_action = action_name
                 continue
 
             # Update canvas state with result
@@ -524,6 +552,39 @@ class SenseDecideActReviewLoop:
                     "layer_id": layer_id,
                 }
 
+            # Batch Actions return a typed image map. The Agent still owns the
+            # next decision (review/finish); the handler only executes tools.
+            if isinstance(data.get("images"), dict):
+                batch_prompts = data.get("prompts", {}) or {}
+                requested_image_types = action_config.get("image_types") or list(data["images"])
+                memory.image_types = [
+                    image_type for image_type in requested_image_types
+                    if image_type in {"main", "selling_point", "detail"}
+                ]
+                for image_type, image_url in data["images"].items():
+                    prompt = batch_prompts.get(image_type, "")
+                    canvas = self._canvas.create_layer(
+                        cid,
+                        layer_type="subject",
+                        asset_ref=image_url,
+                        prompt_used=prompt,
+                        status="ready",
+                    )
+                    generated_images[image_type] = image_url
+                    all_prompts[image_type] = prompt
+                    if hasattr(memory, "record_generation"):
+                        memory.record_generation(image_type, prompt, image_url, 0)
+                    yield {
+                        "event": "image_progress",
+                        "image_type": image_type,
+                        "url": image_url,
+                        "prompt": prompt,
+                    }
+                if action_name == "style_transfer_batch":
+                    memory.reference_images_intent = "style_transfer"
+                    memory.vlm_style_analysis = data.get("style_analysis") or None
+                _sync_canvas_to_memory(canvas, memory)
+
             # Create version in version tree
             self._versions.create_version(canvas, f"{action_name}: {reasoning[:100]}")
 
@@ -561,6 +622,23 @@ class SenseDecideActReviewLoop:
                         "passed": review_result.passed,
                         "issues": review_result.issues,
                     })
+
+                    if region_edit_requested and generated_images:
+                        avg_scores = _compute_average_scores(all_evaluations)
+                        yield {
+                            "event": "image_done",
+                            "all_images": generated_images,
+                            "all_prompts": all_prompts,
+                            "average_scores": avg_scores,
+                        }
+                        completion_text = "已完成框选区域修改，框外画面保持不变。"
+                        yield {"event": "agent_message", "agent": "agent", "text": completion_text}
+                        memory.add_chat_turn("assistant", completion_text)
+                        _sync_canvas_to_memory(canvas, memory)
+                        yield {"event": "memory_updated", "agent_memory": memory.to_dict()}
+                        yield {"event": "canvas_queried", "current_images": memory.current_images, "stitch_regions": memory.stitch_regions}
+                        yield {"event": "done"}
+                        return
 
                     # If all needed image types are generated, finish
                     image_types_needed = getattr(memory, "image_types", [])
@@ -643,26 +721,33 @@ class SenseDecideActReviewLoop:
         memory: Any,
         product_image_base64: str,
         rag_retriever: Any,
+        request_hints: dict[str, Any] | None = None,
     ) -> tuple[DesignBrief, EnrichedContext, bool]:
-        """Phase 1: SENSE — classify, filter, assemble context, check clarification."""
-        from agent.intent.classifier import classify_input
-        from agent.intent.brief_parser import apply_requirement_reply
-        from agent.intent.clarifier import needs_clarification
+        """Phase 1: SENSE — model-based goal and slot understanding."""
         from agent.intent.context_assembler import assemble_context
 
-        # Persist compact replies such as "自然场景，卖点图" before checking
-        # missing slots, otherwise the Agent asks the same questions again.
-        apply_requirement_reply(message, memory)
+        understanding: dict[str, Any] = {}
+        try:
+            understanding = await self._call_sense_llm(message, memory, request_hints or {})
+        except Exception as error:
+            # This does not choose a business action. DECIDE remains model-owned
+            # and will return a retryable error if all model fallbacks are down.
+            logger.warning("[Agent Sense] understanding unavailable: %s", error)
 
-        # Classify intent
-        has_image = bool(product_image_base64)
-        intent = classify_input(
-            message,
-            has_image=has_image,
-            memory=memory,
-            last_intent=getattr(memory, "last_intent", ""),
-            current_phase=getattr(memory, "current_phase", ""),
-        )
+        slots = understanding.get("slots", {}) if isinstance(understanding.get("slots"), dict) else {}
+        for field in (
+            "product_name", "selling_points", "style_preference", "ecom_platform",
+            "target_country", "aspect_ratio", "image_types", "color_palette",
+        ):
+            value = slots.get(field)
+            if value not in (None, "", []):
+                setattr(memory, field, value)
+        intent_value = understanding.get("intent", "")
+        try:
+            intent = IntentType(intent_value)
+        except ValueError:
+            intent = IntentType.NEW_DESIGN if product_image_base64 else IntentType.CHITCHAT
+        memory.last_intent = intent.value
 
         # Build design brief from message and memory
         brief = DesignBrief(
@@ -676,12 +761,8 @@ class SenseDecideActReviewLoop:
             selling_points=getattr(memory, "selling_points", ""),
             color_palette=getattr(memory, "color_palette", []),
             raw_message=message,
-            reference_image_refs=[f"data:image/png;base64,{product_image_base64}"] if product_image_base64 else [],
+            reference_image_refs=[_as_data_url(product_image_base64)] if product_image_base64 else [],
         )
-
-        # If new design or chitchat and no subject, extract from message
-        if not brief.subject and intent in (IntentType.NEW_DESIGN, IntentType.CHITCHAT):
-            brief.subject = message[:100]  # Use message as tentative subject
 
         # RAG context
         rag_context = ""
@@ -712,15 +793,13 @@ class SenseDecideActReviewLoop:
             brand_context=brand_context,
             rag_context=rag_context,
         )
+        enriched_ctx.clarification_questions = [
+            str(question).strip()
+            for question in (understanding.get("clarification_questions") or [])
+            if str(question).strip()
+        ][:3]
 
-        # Check if clarification is needed (only for NEW_DESIGN with missing info)
-        clarification_needed = False
-        if intent == IntentType.NEW_DESIGN:
-            clarification_needed = needs_clarification(
-                brief,
-                recent_chat=getattr(memory, "recent_chat", None),
-                current_phase=getattr(memory, "current_phase", ""),
-            )
+        clarification_needed = bool(understanding.get("needs_clarification", False))
 
         return brief, enriched_ctx, clarification_needed
 
@@ -736,9 +815,43 @@ class SenseDecideActReviewLoop:
         iteration: int,
         product_image_base64: str = "",
         has_product_image: bool = False,
+        request_hints: dict[str, Any] | None = None,
+        action_failures: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Phase 2: DECIDE — LLM selects the next action from the registry."""
+        hints = request_hints or {}
+        if (
+            hints.get("direct_image_request")
+            and hints.get("region_edit_requested")
+            and hints.get("edit_reference_count", 0) > 0
+        ):
+            # This is an Agent harness policy, not keyword routing: the UI event
+            # proves the user selected a bounded image-edit action. Asking an LLM
+            # to rediscover the tool adds cost, latency and a failure point.
+            return {
+                "plan": {
+                    "goal": "修改用户框选的图片区域",
+                    "steps": ["读取框选图", "执行局部图像编辑", "审查结果"],
+                    "completion_criteria": ["框内问题已修复", "框外画面保持不变"],
+                },
+                "action": "generate_layer",
+                "params": {
+                    "layer_type": "subject",
+                    "prompt": design_brief.raw_message,
+                    "style_tags": [],
+                },
+                "reasoning": "用户已通过框选图明确编辑范围，直接执行图像编辑。",
+            }
         available_actions = list_actions()
+        # Tool discovery is capability-aware. A style-transfer action cannot
+        # run without an explicit style reference, so do not advertise it to
+        # DECIDE and then spend another model round repairing an impossible
+        # choice. This is a runtime tool precondition, not intent routing.
+        if not hints.get("reference_attachment_count", 0):
+            available_actions = [
+                action for action in available_actions
+                if action != "style_transfer_batch"
+            ]
         action_descriptions = {
             "generate_layer": "生成一个新图层图片。params: layer_type (subject/background/text/decoration), prompt (英文), style_tags",
             "inpaint_region": "局部重绘某个图层的区域。params: layer_id, bbox (x,y,width,height), prompt",
@@ -747,6 +860,8 @@ class SenseDecideActReviewLoop:
             "upscale": "超分辨率放大图层。params: layer_id, scale_factor (2或4)",
             "layout_suggest": "AI建议图层布局。params: image_types (图片类型列表)",
             "search_knowledge": "搜索RAG知识库获取 prompt 模板/风格指南/平台规则。params: query (搜索词), categories (分类列表，可选: prompt_template, style_guide, platform_rule, copywriting)",
+            "generate_product_set": "基于商品原图生成一组电商图片，可用于A+/详情页、主图、卖点图和续作。必填 params.image_types，值只能从 main、selling_point、detail 中选择；可选 product_name、selling_points、style_preference",
+            "style_transfer_batch": "需要商品图和明确上传的风格参考图；把参考图的视觉语言迁移到新商品。必填 params.image_types，值只能从 main、selling_point、detail 中选择；可选 product_name、selling_points",
         }
 
         # Build decide prompt
@@ -768,6 +883,16 @@ class SenseDecideActReviewLoop:
             context_parts.append(f"\n## 知识库参考\n{enriched_ctx.rag_context[:300]}")
         if enriched_ctx.brand_context:
             context_parts.append(f"\n{enriched_ctx.brand_context}")
+        if getattr(memory, "design_plan", None):
+            context_parts.append(
+                "\n## 当前任务计划\n"
+                + json.dumps(memory.design_plan, ensure_ascii=False)
+            )
+        if action_failures:
+            context_parts.append(
+                "\n## Action 执行反馈（必须修正，不能直接 finish）\n"
+                + json.dumps(action_failures[-3:], ensure_ascii=False)
+            )
 
         # Canvas state summary
         layer_summary = []
@@ -793,35 +918,23 @@ class SenseDecideActReviewLoop:
                 "\n## 用户上传了产品参考图\n"
                 "图片已作为多模态输入提供给本决策。请根据图片内容确定产品特征、颜色、形状等。"
             )
+        if request_hints:
+            context_parts.append(
+                "\n## 界面提供的输入事实（仅供决策，不是执行指令）\n"
+                + json.dumps(request_hints, ensure_ascii=False)
+            )
 
         context = "\n".join(context_parts)
 
-        # Call LLM to decide — include product image as multimodal content
-        try:
-            decision = await self._call_decide_llm(
-                system_prompt, context,
-                product_image_base64=product_image_base64,
-                memory=memory,
-            )
-            return decision
-        except Exception as e:
-            logger.error(f"Decide LLM call failed: {e}")
-            # Fallback: if nothing generated yet, generate main layer
-            if not generated_images and design_brief.subject:
-                from agent.intent.prompt_expander import expand_prompt
-
-                prompt = await expand_prompt(design_brief, enriched_ctx, "subject",
-                                             rag_retriever=rag_retriever)
-                return {
-                    "action": "generate_layer",
-                    "params": {
-                        "layer_type": "subject",
-                        "prompt": prompt,
-                        "style_tags": design_brief.color_palette,
-                    },
-                    "reasoning": f"Auto-generate subject layer (LLM fallback: {e})",
-                }
-            return {"action": "finish", "params": {}, "reasoning": "LLM decision failed, finishing"}
+        # DECIDE selects a tool from structured state; it does not need to
+        # re-read the full-resolution product image. The product image remains
+        # available to ACT as the authoritative generation reference. Avoiding
+        # a redundant multimodal call materially reduces time-to-first-action.
+        return await self._call_decide_llm(
+            system_prompt, context,
+            product_image_base64="",
+            memory=memory,
+        )
 
     async def _review(
         self,
@@ -832,6 +945,30 @@ class SenseDecideActReviewLoop:
         data: dict[str, Any],
     ) -> ReviewResult | None:
         """Phase 4: REVIEW — local for single layer, global for compose."""
+        if action_name in ("generate_product_set", "style_transfer_batch") and data.get("images"):
+            from agent.review.local_review import review_layer_quality
+
+            reviews = []
+            for image_type, image_url in data["images"].items():
+                layer = next((item for item in reversed(canvas.layers) if item.asset_ref == image_url), None)
+                if layer is None:
+                    continue
+                reviews.append(await review_layer_quality(
+                    layer=layer,
+                    image_url=image_url,
+                    prompt_used=(data.get("prompts", {}) or {}).get(image_type, ""),
+                    vision_config=self._review_config,
+                ))
+            if reviews:
+                return ReviewResult(
+                    passed=all(review.passed for review in reviews),
+                    overall_score=sum(review.overall_score for review in reviews) / len(reviews),
+                    local_score=sum(review.local_score for review in reviews) / len(reviews),
+                    scores={},
+                    issues=[issue for review in reviews for issue in review.issues],
+                    suggestions=[suggestion for review in reviews for suggestion in review.suggestions],
+                )
+
         # Skip review for non-generative actions
         if action_name in ("layout_suggest", "remove_background", "upscale"):
             return None
@@ -840,7 +977,7 @@ class SenseDecideActReviewLoop:
         if action_name == "compose":
             from agent.review.global_review import review_composition
 
-            return await review_composition(canvas, design_brief, self._vision_config)
+            return await review_composition(canvas, design_brief, self._review_config)
 
         # For generate_layer: do local review
         if action_name == "generate_layer" and "url" in data:
@@ -854,7 +991,7 @@ class SenseDecideActReviewLoop:
                 layer=layer,
                 image_url=data["url"],
                 prompt_used=data.get("prompt", ""),
-                vision_config=self._vision_config,
+                vision_config=self._review_config,
             )
 
         # For inpaint: do local review
@@ -869,7 +1006,7 @@ class SenseDecideActReviewLoop:
                 layer=layer,
                 image_url=data["url"],
                 prompt_used=data.get("prompt", ""),
-                vision_config=self._vision_config,
+                vision_config=self._review_config,
             )
 
         return None
@@ -877,6 +1014,64 @@ class SenseDecideActReviewLoop:
     # ================================================================
     # LLM helpers
     # ================================================================
+
+    async def _call_sense_llm(
+        self,
+        message: str,
+        memory: Any,
+        request_hints: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Use the Agent model to understand the goal and update task slots."""
+        _agent_service_dir = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "backend", "agent_service"),
+        )
+        if _agent_service_dir not in sys.path:
+            sys.path.insert(0, _agent_service_dir)
+        from chat_client import execute_chat_with_fallbacks, get_chat_fallback_configs
+        from config import clean_json_string
+
+        memory_context = memory.build_llm_context() if hasattr(memory, "build_llm_context") else ""
+        system_prompt = (
+            "你是电商视觉 Agent 的 SENSE 模块。理解用户当前目标，并结合持续任务记忆提取本轮变化。"
+            "不要选择工具，不要生成图片，不要用关键词机械匹配。返回严格 JSON："
+            '{"intent":"new_design|continue_generation|style_transfer|edit_layer|upload_reference|clarification|chitchat",'
+            '"goal":"一句话目标","slots":{"product_name":"","selling_points":"","style_preference":"",'
+            '"ecom_platform":"","target_country":"","aspect_ratio":"","image_types":[],"color_palette":[]},'
+            '"needs_clarification":false,"clarification_questions":[]}。'
+            "只提取用户明确表达或上下文能可靠确定的字段；续作必须保留未改变的历史字段。"
+            "只有缺失信息会实质改变结果时才提问，最多3个问题。"
+        )
+        user_prompt = (
+            f"当前任务记忆：\n{memory_context or '无'}\n\n"
+            f"界面输入事实：\n{json.dumps(request_hints, ensure_ascii=False)}\n\n"
+            f"用户本轮消息：\n{message}"
+        )
+        primary_config = {
+            "protocol": "openai",
+            "api_key": self._chat_config.get("api_key", ""),
+            "base_url": self._chat_config.get("base_url", "https://api.deepseek.com/v1"),
+            "model": self._chat_config.get("model", "deepseek-chat"),
+            "timeout_seconds": 20,
+            "retry_attempts": 1,
+        }
+        fallback_configs = self._chat_fallback_chain(get_chat_fallback_configs())
+
+        def validate_understanding(response: str) -> dict[str, Any]:
+            parsed = json.loads(clean_json_string(response))
+            if not isinstance(parsed, dict):
+                raise ValueError("Agent sense response must be a JSON object")
+            return parsed
+
+        parsed = await execute_chat_with_fallbacks(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            primary_config,
+            fallback_configs,
+            response_validator=validate_understanding,
+        )
+        return parsed
 
     def _build_decide_prompt(
         self,
@@ -897,17 +1092,23 @@ class SenseDecideActReviewLoop:
             "- **chat**: 需要和用户对话（询问信息、回答闲聊等）。params: text (中文回复文本)\n\n"
             "## 决策规则\n"
             "1. 如果画布为空且用户需要生成图片 → generate_layer (subject)\n"
-            "2. 如果已有主体图但缺少其他类型 → generate_layer (对应类型)\n"
-            "3. 如果所有需要的类型都已生成 → finish\n"
-            "4. 如果用户信息不足（不知道产品、风格等） → chat 询问\n"
-            "5. 多图层需要合并时 → compose\n"
-            "6. 用户闲聊 → chat 友好回复并引导回商品图话题\n"
-            "7. 不要连续两次执行相同动作，检查重试次数避免死循环\n"
-            "8. 如果用户上传了产品参考图（上下文中有说明），生成 prompt 时必须描述该产品的实际外观特征（颜色、形状、材质等）\n"
-            "9. 如果对 prompt 写法不确定或需要某平台的风格参考，可先调用 search_knowledge 检索知识库\n\n"
+            "2. A+/详情页、商品套图、沿用商品继续生成 → generate_product_set；由 image_types 指定输出类型\n"
+            "3. 有风格参考图且目标是风格迁移 → style_transfer_batch\n"
+            "   未标注用途的参考附件不是自动风格迁移指令；结合用户目标判断。用户明确说“按这个风格”等且有参考附件时，可将其作为风格参考。\n"
+            "4. 单张自由创作或单图编辑 → generate_layer，并使用商品原图作为 reference_images\n"
+            "5. Action 返回图片后，结合目标和当前结果决定继续、审查或 finish\n"
+            "6. 如果用户信息不足 → chat 询问；用户闲聊 → chat 回复\n"
+            "7. 多图层需要合并时 → compose\n"
+            "8. 不要连续执行无进展的相同动作，检查重试次数避免死循环\n"
+            "9. 用户上传的商品图是商品身份唯一真源，不得替换或虚构商品特征\n"
+            "10. 对 prompt 或平台规则不确定时，可先 search_knowledge\n"
+            "11. 收到 Action 执行反馈时，必须修正 params 后重新调用；未生成目标图片前禁止 finish\n\n"
+            "12. 界面输入事实中的附件数量是后端已接收的权威事实；数量大于0时禁止回复‘未收到图片’或要求重新上传\n"
+            "13. region_edit_requested=true 且用户提出修改要求时，选择 generate_layer；框选图已包含位置，不得再次询问坐标或图层\n\n"
             "## 输出格式\n"
             "返回严格的JSON对象（不要markdown包裹）：\n"
-            '{"action": "动作名", "params": {...}, "reasoning": "简短中文说明"}\n'
+            '{"plan":{"goal":"目标","steps":["步骤"],"completion_criteria":["标准"]},'
+            '"action":"动作名","params":{...},"reasoning":"简短中文说明"}\n'
         )
 
     async def _call_decide_llm(
@@ -942,7 +1143,7 @@ class SenseDecideActReviewLoop:
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": f"data:image/png;base64,{product_image_base64}",
+                        "url": _as_data_url(product_image_base64),
                         "detail": "auto",
                     },
                 },
@@ -969,16 +1170,41 @@ class SenseDecideActReviewLoop:
             "model": self._chat_config.get("model", "deepseek-chat"),
         }
 
-        resp = await execute_chat_with_fallbacks(
-            messages, primary_config, get_chat_fallback_configs()
+        primary_config.update({"timeout_seconds": 20, "retry_attempts": 1})
+        fallback_configs = self._chat_fallback_chain(get_chat_fallback_configs())
+
+        def validate_decision(response: str) -> dict[str, Any]:
+            parsed = json.loads(clean_json_string(response))
+            if not isinstance(parsed, dict):
+                raise ValueError("Agent decision must be a JSON object")
+            return parsed
+
+        decision = await execute_chat_with_fallbacks(
+            messages,
+            primary_config,
+            fallback_configs,
+            response_validator=validate_decision,
         )
-        cleaned = clean_json_string(resp)
-        return json.loads(cleaned)
+        params = decision.get("params")
+        if not isinstance(params, dict):
+            decision["params"] = {}
+        elif isinstance(params.get("style_tags"), str):
+            params["style_tags"] = [
+                item.strip() for item in params["style_tags"].split(",") if item.strip()
+            ]
+        return decision
 
 
 # ================================================================
 # Module-level helpers
 # ================================================================
+
+
+def _as_data_url(image: str) -> str:
+    """Normalize either a full data URL or raw base64 for multimodal calls."""
+    if not image:
+        return ""
+    return image if image.startswith("data:image/") else f"data:image/png;base64,{image}"
 
 
 def _hydrate_canvas_from_memory(

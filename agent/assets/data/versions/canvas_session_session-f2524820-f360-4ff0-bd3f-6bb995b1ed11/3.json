@@ -1,0 +1,55 @@
+{
+  "version": 3,
+  "parent_version": null,
+  "canvas_state": {
+    "canvas_id": "canvas_session_session-f2524820-f360-4ff0-bd3f-6bb995b1ed11",
+    "size": {
+      "width": 1920,
+      "height": 1920
+    },
+    "layers": [
+      {
+        "id": "bd747be6",
+        "type": "subject",
+        "z_index": 1,
+        "bbox": {
+          "x": 0.0,
+          "y": 0.0,
+          "width": 1920.0,
+          "height": 1920.0
+        },
+        "asset_ref": "https://ark-acg-cn-beijing.tos-cn-beijing.volces.com/doubao-seedream-5-0/021784219260812c85c17782ebc45169ced08d4429f63da2b73ac_0.jpeg?X-Tos-Algorithm=TOS4-HMAC-SHA256&X-Tos-Credential=REDACTED_ACCESS_KEY-beijing%2Ftos%2Frequest&X-Tos-Date=20260716T162804Z&X-Tos-Expires=86400&X-Tos-Signature=a72dac4524cc943d538c36c77f62940c3f8ae232258dc49bfa291073bc1448aa&X-Tos-SignedHeaders=host",
+        "prompt_used": null,
+        "style_tags": [],
+        "status": "ready",
+        "metadata": {}
+      },
+      {
+        "id": "b1df8fb8",
+        "type": "subject",
+        "z_index": 2,
+        "bbox": {
+          "x": 0.0,
+          "y": 0.0,
+          "width": 1920.0,
+          "height": 1920.0
+        },
+        "asset_ref": "https://ark-acg-cn-beijing.tos-cn-beijing.volces.com/doubao-seedream-5-0/02178421983985397a1afc6d0f1d4c33b4bb521a275374ff06a4a_0.jpeg?X-Tos-Algorithm=TOS4-HMAC-SHA256&X-Tos-Credential=REDACTED_ACCESS_KEY-beijing%2Ftos%2Frequest&X-Tos-Date=20260716T163742Z&X-Tos-Expires=86400&X-Tos-Signature=4d27d4711d69407e32b7c4d877164b48a30861ba4bef8160a160bd605342d1e3&X-Tos-SignedHeaders=host",
+        "prompt_used": "这是一张带有彩色矩形线框的图片编辑任务。只修改矩形框内的区域，框外的产品、构图、光影和背景保持不变。最终图片中移除彩色矩形框和透明色块。\n用户修改要求：xiao'mi",
+        "style_tags": [],
+        "status": "ready",
+        "metadata": {}
+      }
+    ],
+    "global_style": {
+      "primary_color": null,
+      "light_direction": null,
+      "mood": "参照已上传的参考图风格",
+      "background_type": null
+    },
+    "version": 3,
+    "parent_version": null
+  },
+  "created_at": "2026-07-17T00:37:42.790554",
+  "description": "generate_layer: 用户已通过框选图明确编辑范围，直接执行图像编辑。"
+}

@@ -161,6 +161,7 @@ class RunRequest(BaseModel):
     """Node.js 只传业务数据，不传密钥"""
     # Flow control
     current_phase: str = "COLLECTING_INFO"
+    session_id: str = ""
     chat_history: List[Dict[str, str]] = []
     message: str = Field(default="", max_length=4000)
 
@@ -216,6 +217,7 @@ async def run_agent_stream(req: RunRequest):
 
     inputs = {
         "current_phase": req.current_phase,
+        "session_id": req.session_id,
         "chat_history": req.chat_history,
         "message": req.message,
 

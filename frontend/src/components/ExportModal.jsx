@@ -106,6 +106,12 @@ export default function ExportModal({
             <span>导出分组</span>
             <strong>{clusterCount} 个</strong>
           </div>
+          {clusterCount > 1 && (
+            <div className="export-summary-row">
+              <span>下载方式</span>
+              <strong>打包为 1 个 ZIP（内含 {clusterCount} 张）</strong>
+            </div>
+          )}
           <div className="export-summary-row">
             <span>选择清晰度</span>
             <strong>{QUALITY_OPTIONS.find(q => q.scale === exportScale)?.title} ({exportScale}x)</strong>

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { composeImageWithRegions, createImageEditRegion } from '../../frontend/src/lib/regionEdit';
+import { composeImageWithRegions, createImageEditRegion, loadImageForComposition } from '../../frontend/src/lib/regionEdit';
 
 describe('region edit composition', () => {
   afterEach(() => {
@@ -57,5 +57,33 @@ describe('region edit composition', () => {
       relY: 0,
       isEditRegion: true,
     });
+  });
+
+  it('falls back to the authenticated image resolver when browser loading is blocked', async () => {
+    let loadCount = 0;
+    class MockImage {
+      set src(value) {
+        this._src = value;
+        loadCount += 1;
+        queueMicrotask(() => {
+          if (loadCount === 1) this.onerror?.();
+          else this.onload?.();
+        });
+      }
+    }
+    vi.stubGlobal('Image', MockImage);
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data_url: 'data:image/png;base64,cHJveGllZA==' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const image = await loadImageForComposition('https://example-provider.test/image.png');
+
+    expect(image._src).toBe('data:image/png;base64,cHJveGllZA==');
+    expect(fetchMock).toHaveBeenCalledWith('/api/assets/image-data', expect.objectContaining({
+      method: 'POST',
+      credentials: 'include',
+    }));
   });
 });

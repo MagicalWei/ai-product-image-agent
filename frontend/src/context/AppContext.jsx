@@ -2,6 +2,13 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from './AuthContext';
+import { fetchJsonWithRetry } from '../lib/reliableFetch';
+import {
+  loadConversationCache,
+  mergeConversationMessages,
+  saveConversationCache,
+  toDurableConversationHistory,
+} from '../lib/conversationCache';
 
 const AppContext = createContext(null);
 
@@ -175,36 +182,62 @@ export const AppProvider = ({ children }) => {
       });
       const data = await response.json();
       if (response.ok && data.success && data.session) {
+        const restoredCanvasState = data.session.canvas_state && typeof data.session.canvas_state === 'object'
+          ? data.session.canvas_state
+          : {};
+        // Tag the canvas with its owner session. This prevents a previous or
+        // empty local canvas from being saved into the newly selected session.
+        setCurrentCanvasState({
+          ...restoredCanvasState,
+          elements: Array.isArray(restoredCanvasState.elements) ? restoredCanvasState.elements : [],
+          camera: restoredCanvasState.camera || { x: 400, y: 300, zoom: 1 },
+          _session_id: sessionId,
+        });
         setCurrentSessionId(sessionId);
         localStorage.setItem('current_session_id', sessionId);
         
         const rawHistory = data.session.chat_history || [];
         const mappedMessages = rawHistory.map(msg => {
           if (msg.role === 'user') {
-            return { sender: 'user', text: msg.content };
+            return {
+              id: msg.id,
+              sender: 'user',
+              text: msg.content,
+              images: Array.isArray(msg.images) ? msg.images : [],
+            };
           } else {
-            return { sender: 'ai', agent: 'coordinator', text: msg.content };
+            return {
+              id: msg.id,
+              sender: 'ai',
+              agent: msg.agent || (msg.role === 'status' ? 'react_agent' : 'coordinator'),
+              type: msg.type,
+              text: msg.content,
+            };
           }
         });
 
         const confirmedAnalysis = data.session.product_analysis_confirmed;
         const draftAnalysis = data.session.product_analysis_draft;
         if (confirmedAnalysis && Object.keys(confirmedAnalysis).length > 0) {
-          mappedMessages.push({
+          const analysisMessage = {
             id: `product-analysis-${sessionId}`,
             sender: 'ai',
             type: 'product_analysis',
             data: confirmedAnalysis,
             confirmed: true,
-          });
+          };
+          const position = Number(confirmedAnalysis?._timeline?.after_turn_count);
+          mappedMessages.splice(Number.isFinite(position) ? Math.max(0, Math.min(position, mappedMessages.length)) : mappedMessages.length, 0, analysisMessage);
         } else if (draftAnalysis && Object.keys(draftAnalysis).length > 0) {
-          mappedMessages.push({
+          const analysisMessage = {
             id: `product-analysis-${sessionId}`,
             sender: 'ai',
             type: 'product_analysis',
             data: draftAnalysis,
             confirmed: false,
-          });
+          };
+          const position = Number(draftAnalysis?._timeline?.after_turn_count);
+          mappedMessages.splice(Number.isFinite(position) ? Math.max(0, Math.min(position, mappedMessages.length)) : mappedMessages.length, 0, analysisMessage);
         }
         
         if (mappedMessages.length === 0) {
@@ -215,7 +248,25 @@ export const AppProvider = ({ children }) => {
           });
         }
         
-        setChatMessages(mappedMessages);
+        const cachedMessages = loadConversationCache(sessionId);
+        const repairedMessages = mergeConversationMessages(mappedMessages, cachedMessages);
+        setChatMessages(repairedMessages);
+        saveConversationCache(sessionId, repairedMessages);
+
+        // Backfill legacy browser-only status/attachment records after their
+        // chronology has been repaired. This runs in the background so opening
+        // a conversation is not delayed by cloud synchronization.
+        const repairedHistory = toDurableConversationHistory(repairedMessages);
+        const serverTimeline = rawHistory.map(turn => `${turn.role}|${turn.content || ''}`);
+        const repairedTimeline = repairedHistory.map(turn => `${turn.role}|${turn.content || ''}`);
+        if (cachedMessages.length > 0 && JSON.stringify(serverTimeline) !== JSON.stringify(repairedTimeline)) {
+          fetch(`/api/agent/sessions/${sessionId}/conversation-history`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ chat_history: repairedHistory }),
+          }).catch(error => console.warn('Failed to backfill repaired conversation history:', error));
+        }
         
         const lastParams = data.session.last_params || {};
         if (lastParams.product_name) {
@@ -226,26 +277,27 @@ export const AppProvider = ({ children }) => {
           });
         }
 
-        // Restore canvas state
-        setCurrentCanvasState(data.session.canvas_state || null);
+        return data.session;
       }
+      showError(data?.error || '加载会话失败');
     } catch (e) {
       showError(`加载会话失败: ${e.message}`);
     }
+    return null;
   }, [isAuthenticated, setChatMessages, setProductInfo, showError]);
 
   const createSession = useCallback(async (title = '新设计会话', authToken) => {
     // authToken parameter kept for backwards compatibility
+    const clientSessionId = `session-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
     try {
-      const response = await fetch('/api/agent/sessions', {
+      const { response, data } = await fetchJsonWithRetry('/api/agent/sessions', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ title }),
+        body: JSON.stringify({ title, client_session_id: clientSessionId }),
         credentials: 'include'
-      });
-      const data = await response.json();
+      }, { attempts: 4, timeoutMs: 30000 });
       if (response.ok && data.success && data.session) {
         const newSession = data.session;
         setSessions(prev => [newSession, ...prev]);
@@ -258,12 +310,21 @@ export const AppProvider = ({ children }) => {
           text: '你好！我是您的 AI 商品图 Crew。请告诉我您的产品名称、卖点和需要的图片类型，我将为您设计并生成一系列精美的商品主图。'
         }]);
 
-        setCurrentCanvasState(null);
+        setCurrentCanvasState({
+          _session_id: newSession.session_id,
+          elements: [],
+          camera: { x: 400, y: 300, zoom: 1 },
+        });
 
         return newSession.session_id;
       }
+      if (data?.code === 'AUTH_SERVICE_TEMPORARY_UNAVAILABLE') {
+        showError('登录状态服务正在恢复，请再次点击生成。');
+      } else if (!response.ok) {
+        showError(data?.error || `创建会话失败（${response.status}）`);
+      }
     } catch (e) {
-      showError(`创建会话失败: ${e.message}`);
+      showError(`创建会话失败，请再次点击生成：${e.message}`);
     }
     return null;
   }, [setChatMessages, showError]);
@@ -336,6 +397,12 @@ export const AppProvider = ({ children }) => {
   useEffect(() => {
     fetchSessions();
   }, [fetchSessions]);
+
+  useEffect(() => {
+    if (currentSessionId && chatMessages.length > 0) {
+      saveConversationCache(currentSessionId, chatMessages);
+    }
+  }, [currentSessionId, chatMessages]);
 
   useEffect(() => {
     if (!isAuthLoading && !isAuthenticated) {

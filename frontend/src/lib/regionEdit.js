@@ -1,10 +1,31 @@
-export const loadImageForComposition = (source) => new Promise((resolve, reject) => {
+const loadImageElement = (source) => new Promise((resolve, reject) => {
   const image = new Image();
   if (/^https?:\/\//.test(source)) image.crossOrigin = 'anonymous';
   image.onload = () => resolve(image);
   image.onerror = () => reject(new Error('无法读取框选的原图'));
   image.src = source;
 });
+
+export const loadImageForComposition = async (source) => {
+  try {
+    return await loadImageElement(source);
+  } catch (directError) {
+    if (!source || source.startsWith('data:image/') || source.startsWith('blob:')) {
+      throw directError;
+    }
+    const response = await fetch('/api/assets/image-data', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: source }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.data_url) {
+      throw new Error(result.error || result.message || '无法从云端读取框选原图');
+    }
+    return loadImageElement(result.data_url);
+  }
+};
 
 /** Compose the source image and visual edit frames at original resolution. */
 export const composeImageWithRegions = async (targetImage, regions, sourceUrl = targetImage.url) => {

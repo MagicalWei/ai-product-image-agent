@@ -10,7 +10,7 @@ import re
 import base64
 import logging
 import asyncio
-from typing import Dict, List, Any, Optional
+from typing import Callable, Dict, List, Any, Optional
 
 import httpx
 
@@ -46,8 +46,21 @@ async def post_json_with_retries(
 ) -> httpx.Response:
     """POST JSON with bounded retries for provider throttling/transient errors."""
     last_resp: httpx.Response | None = None
+    last_error: Exception | None = None
     for attempt in range(1, max(1, attempts) + 1):
-        resp = await client.post(url, headers=headers, json=payload)
+        try:
+            resp = await client.post(url, headers=headers, json=payload)
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            last_error = exc
+            if attempt >= attempts:
+                raise RuntimeError(f"{provider} network error after {attempts} attempts: {exc}") from exc
+            delay = min(8.0, 0.8 * (2 ** (attempt - 1)))
+            logger.warning(
+                "[%s] network error, retrying in %.1fs (%s/%s): %s",
+                provider, delay, attempt, attempts, exc,
+            )
+            await asyncio.sleep(delay)
+            continue
         if resp.status_code < 400:
             return resp
         last_resp = resp
@@ -64,7 +77,9 @@ async def post_json_with_retries(
             attempts,
         )
         await asyncio.sleep(delay)
-    raise RuntimeError(_http_error_message(provider, last_resp))
+    if last_resp is not None:
+        raise RuntimeError(_http_error_message(provider, last_resp))
+    raise RuntimeError(f"{provider} network error: {last_error}")
 
 # ========================================================
 # Model capability detection
@@ -212,6 +227,8 @@ async def _call_anthropic_api(
     api_key: str,
     base_url: str,
     model: str,
+    timeout_seconds: float = 120.0,
+    retry_attempts: int = DEFAULT_HTTP_RETRY_ATTEMPTS,
 ) -> str:
     system_text, api_messages = _build_anthropic_messages(messages)
     url = f"{base_url.rstrip('/')}/v1/messages"
@@ -228,13 +245,15 @@ async def _call_anthropic_api(
     if system_text:
         payload["system"] = system_text
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=30.0)) as client:
+    connect_timeout = min(30.0, max(5.0, timeout_seconds / 2))
+    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds, connect=connect_timeout)) as client:
         resp = await post_json_with_retries(
             client,
             url,
             headers=headers,
             payload=payload,
             provider="Anthropic",
+            attempts=retry_attempts,
         )
         data = resp.json()
         return _extract_text_from_response(data, "anthropic")
@@ -248,6 +267,8 @@ async def _call_openai_compatible_api(
     tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Optional[str] = None,
     max_tokens: Optional[int] = None,
+    timeout_seconds: float = 120.0,
+    retry_attempts: int = DEFAULT_HTTP_RETRY_ATTEMPTS,
 ) -> Dict[str, Any]:
     """Call OpenAI-compatible chat API. Returns {"content": "...", "tool_calls": [...]}."""
     url = f"{base_url.rstrip('/')}/chat/completions"
@@ -265,13 +286,15 @@ async def _call_openai_compatible_api(
         payload["tools"] = tools
         payload["tool_choice"] = tool_choice or "auto"
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=30.0)) as client:
+    connect_timeout = min(30.0, max(5.0, timeout_seconds / 2))
+    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds, connect=connect_timeout)) as client:
         resp = await post_json_with_retries(
             client,
             url,
             headers=headers,
             payload=payload,
             provider="Chat",
+            attempts=retry_attempts,
         )
         data = resp.json()
         return _extract_response(data, "openai")
@@ -287,6 +310,8 @@ async def _call_chat_api(
     tool_choice: Optional[str] = None,
     supports_vision: Optional[bool] = None,
     max_tokens: Optional[int] = None,
+    timeout_seconds: float = 120.0,
+    retry_attempts: int = DEFAULT_HTTP_RETRY_ATTEMPTS,
 ) -> Dict[str, Any]:
     """Call chat API. Returns {"content": "...", "tool_calls": [...]}."""
     vision_enabled = model_supports_vision(model) if supports_vision is None else supports_vision
@@ -294,11 +319,14 @@ async def _call_chat_api(
         messages = strip_images_from_messages(messages)
 
     if protocol == "anthropic":
-        text = await _call_anthropic_api(messages, api_key, base_url, model)
+        text = await _call_anthropic_api(
+            messages, api_key, base_url, model, timeout_seconds, retry_attempts
+        )
         return {"content": text, "tool_calls": []}
     else:
         return await _call_openai_compatible_api(
-            messages, api_key, base_url, model, tools, tool_choice, max_tokens
+            messages, api_key, base_url, model, tools, tool_choice, max_tokens,
+            timeout_seconds, retry_attempts,
         )
 
 # ========================================================
@@ -309,7 +337,8 @@ async def execute_chat_with_fallbacks(
     messages: List[Dict[str, Any]],
     primary_config: Dict[str, Any],
     fallbacks: List[Dict[str, Any]],
-) -> str:
+    response_validator: Optional[Callable[[str], Any]] = None,
+) -> Any:
     async def _try_config(config):
         result = await _call_chat_api(
             messages,
@@ -319,8 +348,16 @@ async def execute_chat_with_fallbacks(
             config["model"],
             supports_vision=config.get("supports_vision"),
             max_tokens=config.get("max_tokens"),
+            timeout_seconds=float(config.get("timeout_seconds", 120.0)),
+            retry_attempts=int(config.get("retry_attempts", DEFAULT_HTTP_RETRY_ATTEMPTS)),
         )
-        return result["content"]
+        content = result["content"]
+        if response_validator is not None:
+            # Validation belongs inside each provider attempt. Otherwise a
+            # HTTP-200 response with empty/malformed structured output wins the
+            # fallback race and fails later, after all fallbacks were skipped.
+            return response_validator(content)
+        return content
 
     primary_error = ""
     # 1. Primary
@@ -363,6 +400,8 @@ async def execute_chat_with_fallbacks_full(
             tool_choice=tool_choice,
             supports_vision=config.get("supports_vision"),
             max_tokens=config.get("max_tokens"),
+            timeout_seconds=float(config.get("timeout_seconds", 120.0)),
+            retry_attempts=int(config.get("retry_attempts", DEFAULT_HTTP_RETRY_ATTEMPTS)),
         )
 
     primary_error = ""

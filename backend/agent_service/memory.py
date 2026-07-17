@@ -61,6 +61,7 @@ class AgentMemory:
 
     # ── Reference image persistence (Phase: memory + style transfer) ──
     reference_image_urls: List[str] = field(default_factory=list)
+    style_reference_image_urls: List[str] = field(default_factory=list)
     reference_images_intent: str = ""  # "style_transfer" | "composition_only" | "ignore"
     vlm_style_analysis: Optional[Dict[str, Any]] = None
     product_image_analysis: Optional[Dict[str, Any]] = None
@@ -98,6 +99,7 @@ class AgentMemory:
             "current_images": self.current_images,
             "stitch_regions": self.stitch_regions,
             "reference_image_urls": self.reference_image_urls,
+            "style_reference_image_urls": self.style_reference_image_urls,
             "reference_images_intent": self.reference_images_intent,
             "vlm_style_analysis": self.vlm_style_analysis,
             "product_image_analysis": self.product_image_analysis,
@@ -138,6 +140,7 @@ class AgentMemory:
             current_images=data.get("current_images", {}),
             stitch_regions=data.get("stitch_regions", []),
             reference_image_urls=data.get("reference_image_urls", []),
+            style_reference_image_urls=data.get("style_reference_image_urls", []),
             reference_images_intent=data.get("reference_images_intent", ""),
             vlm_style_analysis=data.get("vlm_style_analysis"),
             product_image_analysis=data.get("product_image_analysis"),

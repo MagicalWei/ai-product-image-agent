@@ -294,6 +294,8 @@ class RetryDecision(BaseModel):
 
 class IntentType(str, Enum):
     NEW_DESIGN = "new_design"
+    CONTINUE_GENERATION = "continue_generation"
+    STYLE_TRANSFER = "style_transfer"
     EDIT_LAYER = "edit_layer"
     UPLOAD_REFERENCE = "upload_reference"
     CLARIFICATION = "clarification"
@@ -315,6 +317,7 @@ class EnrichedContext(BaseModel):
     rag_context: str = ""
     brand_context: str = ""
     memory_context: str = ""
+    clarification_questions: list[str] = Field(default_factory=list)
     design_suggestions: list[DesignSuggestion] = Field(default_factory=list)
 
 

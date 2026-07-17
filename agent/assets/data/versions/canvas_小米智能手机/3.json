@@ -1,0 +1,55 @@
+{
+  "version": 3,
+  "parent_version": null,
+  "canvas_state": {
+    "canvas_id": "canvas_小米智能手机",
+    "size": {
+      "width": 1920,
+      "height": 1920
+    },
+    "layers": [
+      {
+        "id": "6b155af9",
+        "type": "subject",
+        "z_index": 1,
+        "bbox": {
+          "x": 0.0,
+          "y": 0.0,
+          "width": 1920.0,
+          "height": 1920.0
+        },
+        "asset_ref": "https://ark-acg-cn-beijing.tos-cn-beijing.volces.com/doubao-seedream-5-0/0217842114310540d00bd2433ad042948032361e92cd5ce6f56b3_0.jpeg?X-Tos-Algorithm=TOS4-HMAC-SHA256&X-Tos-Credential=REDACTED_ACCESS_KEY-beijing%2Ftos%2Frequest&X-Tos-Date=20260716T141800Z&X-Tos-Expires=86400&X-Tos-Signature=58c061a67f09d815341f34074c26fe64fd307c7c3bb02338e1f212ffe95e4d6f&X-Tos-SignedHeaders=host",
+        "prompt_used": "IMAGE 1 is the authoritative NEW PRODUCT. Preserve its exact identity, shape, proportions, colors, materials and details. IMAGE 2 is STYLE-ONLY: borrow palette, lighting, composition rhythm, background treatment and mood, but never copy its product, logo, trademark, text or distinctive props. The final image must feature only IMAGE 1's product. Product: 小米智能手机. Transferable style: dominant_colors: #FFFFFF, #C5A059, #F5F5F5, #333333, #E8DCC4; lighting: Soft, diffused studio lighting with high-key exposure; minimal harsh shadows; bright and airy atmosphere emphasizing clarity and cleanliness.; composition: Centered product display arranged on a virtual shelf; hierarchical layout with top branding/headlines, central visual focus, and bottom action bar; balanced use of negative space.; background: Textured light background resembling white European architectural walls with subtle column and relief patterns; clean, sophisticated, and neutral.; mood: Premium, elegant, professional, trustworthy, sophisticated, high-end skincare aesthetic.; typography: Mix of elegant Serif fonts for main headlines (conveying luxury) and clean Sans-serif fonts for body text and prices (ensuring readability); varied font weights and sizes to establish clear visual hierarchy; gold color used for emphasis on key benefits.; decorative_elements: Gold accent lines and borders, Rounded pill-shaped tags and labels, Dotted connector lines linking text to items, Subtle architectural relief patterns (columns, floral motifs), Distinct block backgrounds for pricing/offer info, Vertical side navigation tab. Create a premium square e-commerce hero main image, strong product focus, clean hierarchy, no copied text or logos.",
+        "style_tags": [],
+        "status": "ready",
+        "metadata": {}
+      },
+      {
+        "id": "539d237e",
+        "type": "subject",
+        "z_index": 2,
+        "bbox": {
+          "x": 0.0,
+          "y": 0.0,
+          "width": 1920.0,
+          "height": 1920.0
+        },
+        "asset_ref": "https://ark-acg-cn-beijing.tos-cn-beijing.volces.com/doubao-seedream-5-0/0217842114310641497eb88b7a4c518b8c375b799d349598154d1_0.jpeg?X-Tos-Algorithm=TOS4-HMAC-SHA256&X-Tos-Credential=REDACTED_ACCESS_KEY-beijing%2Ftos%2Frequest&X-Tos-Date=20260716T141757Z&X-Tos-Expires=86400&X-Tos-Signature=632c5912002070e6cb7206d22cb48e8c0c9d9617da18eba017e9c704013d4d68&X-Tos-SignedHeaders=host",
+        "prompt_used": "IMAGE 1 is the authoritative NEW PRODUCT. Preserve its exact identity, shape, proportions, colors, materials and details. IMAGE 2 is STYLE-ONLY: borrow palette, lighting, composition rhythm, background treatment and mood, but never copy its product, logo, trademark, text or distinctive props. The final image must feature only IMAGE 1's product. Product: 小米智能手机. Transferable style: dominant_colors: #FFFFFF, #C5A059, #F5F5F5, #333333, #E8DCC4; lighting: Soft, diffused studio lighting with high-key exposure; minimal harsh shadows; bright and airy atmosphere emphasizing clarity and cleanliness.; composition: Centered product display arranged on a virtual shelf; hierarchical layout with top branding/headlines, central visual focus, and bottom action bar; balanced use of negative space.; background: Textured light background resembling white European architectural walls with subtle column and relief patterns; clean, sophisticated, and neutral.; mood: Premium, elegant, professional, trustworthy, sophisticated, high-end skincare aesthetic.; typography: Mix of elegant Serif fonts for main headlines (conveying luxury) and clean Sans-serif fonts for body text and prices (ensuring readability); varied font weights and sizes to establish clear visual hierarchy; gold color used for emphasis on key benefits.; decorative_elements: Gold accent lines and borders, Rounded pill-shaped tags and labels, Dotted connector lines linking text to items, Subtle architectural relief patterns (columns, floral motifs), Distinct block backgrounds for pricing/offer info, Vertical side navigation tab. Create a square selling-point image with clear visual callouts for: ['徕卡光学影像', '独特四圆环镜头模组', '清新配色选择', '极窄边框全面屏']. Use concise original Chinese copy only when legible.",
+        "style_tags": [],
+        "status": "ready",
+        "metadata": {}
+      }
+    ],
+    "global_style": {
+      "primary_color": null,
+      "light_direction": null,
+      "mood": null,
+      "background_type": null
+    },
+    "version": 3,
+    "parent_version": null
+  },
+  "created_at": "2026-07-16T22:18:00.770862",
+  "description": "style_transfer_batch: 用户已上传风格参考图和产品图，明确要求根据风格制作主图和卖点图，符合style_transfer_batch使用条件，批量生成可保持风格一致。"
+}

@@ -1,0 +1,49 @@
+{
+  "canvas_id": "canvas_军事兵人玩具模型",
+  "size": {
+    "width": 1920,
+    "height": 1920
+  },
+  "layers": [
+    {
+      "id": "3ed3f398",
+      "type": "subject",
+      "z_index": 1,
+      "bbox": {
+        "x": 0.0,
+        "y": 0.0,
+        "width": 1920.0,
+        "height": 1920.0
+      },
+      "asset_ref": "https://ark-acg-cn-beijing.tos-cn-beijing.volces.com/doubao-seedream-5-0/02178417266424897a1afc6d0f1d4c33b4bb521a275374f676ee8_0.jpeg?X-Tos-Algorithm=TOS4-HMAC-SHA256&X-Tos-Credential=REDACTED_ACCESS_KEY-beijing%2Ftos%2Frequest&X-Tos-Date=20260716T033152Z&X-Tos-Expires=86400&X-Tos-Signature=a7667738c36e7eedaf7dcbdc8b7d7595126fc2c87095929d69885d7d635cbf96&X-Tos-SignedHeaders=host",
+      "prompt_used": "IMAGE 1 is the authoritative NEW PRODUCT. Preserve its exact identity, shape, proportions, colors, materials and details. IMAGE 2 is STYLE-ONLY: borrow palette, lighting, composition rhythm, background treatment and mood, but never copy its product, logo, trademark, text or distinctive props. The final image must feature only IMAGE 1's product. Product: 军事兵人玩具模型. Transferable style: dominant_colors: #FFFFFF, #F8F8F5, #C5A065, #4A4A4A, #2C2C2C, #E8DCC4; lighting: Soft, diffused high-key lighting; clean and bright aesthetic with minimal hard shadows, emphasizing a clinical yet luxurious feel.; composition: Centered horizontal arrangement of items on a tiered white pedestal; hierarchical text layout with large central headline, floating labels connected by lines, and a distinct bottom banner for calls to action.; background: Subtle, low-contrast texture resembling classical European architectural moldings or plaster reliefs in white/light gray, providing a sense of depth without distraction.; mood: Professional, elegant, trustworthy, clinical, premium, clean.; typography: Elegant serif typeface for main headlines in gold/bronze tones; clean, legible sans-serif for descriptive text in dark gray/black; bold, prominent numerals for pricing elements.; decorative_elements: Classical architectural relief patterns (faint background), Thin guide lines connecting floating labels to specific items, Small circular nodes at line endpoints, Rounded rectangular pill-shaped tags, Vertical capsule-shaped label on the left edge. Create a premium square e-commerce hero main image, strong product focus, clean hierarchy, no copied text or logos.",
+      "style_tags": [],
+      "status": "ready",
+      "metadata": {}
+    },
+    {
+      "id": "a50c51c7",
+      "type": "subject",
+      "z_index": 2,
+      "bbox": {
+        "x": 0.0,
+        "y": 0.0,
+        "width": 1920.0,
+        "height": 1920.0
+      },
+      "asset_ref": "https://ark-acg-cn-beijing.tos-cn-beijing.volces.com/doubao-seedream-5-0/021784172664251b74211a9fa242456af57e687c336f2686f9a1c_0.jpeg?X-Tos-Algorithm=TOS4-HMAC-SHA256&X-Tos-Credential=REDACTED_ACCESS_KEY-beijing%2Ftos%2Frequest&X-Tos-Date=20260716T033150Z&X-Tos-Expires=86400&X-Tos-Signature=9c7fd634a9961af880491a3105264dab79290b03bc8068b61aad2282372b6e8c&X-Tos-SignedHeaders=host",
+      "prompt_used": "IMAGE 1 is the authoritative NEW PRODUCT. Preserve its exact identity, shape, proportions, colors, materials and details. IMAGE 2 is STYLE-ONLY: borrow palette, lighting, composition rhythm, background treatment and mood, but never copy its product, logo, trademark, text or distinctive props. The final image must feature only IMAGE 1's product. Product: 军事兵人玩具模型. Transferable style: dominant_colors: #FFFFFF, #F8F8F5, #C5A065, #4A4A4A, #2C2C2C, #E8DCC4; lighting: Soft, diffused high-key lighting; clean and bright aesthetic with minimal hard shadows, emphasizing a clinical yet luxurious feel.; composition: Centered horizontal arrangement of items on a tiered white pedestal; hierarchical text layout with large central headline, floating labels connected by lines, and a distinct bottom banner for calls to action.; background: Subtle, low-contrast texture resembling classical European architectural moldings or plaster reliefs in white/light gray, providing a sense of depth without distraction.; mood: Professional, elegant, trustworthy, clinical, premium, clean.; typography: Elegant serif typeface for main headlines in gold/bronze tones; clean, legible sans-serif for descriptive text in dark gray/black; bold, prominent numerals for pricing elements.; decorative_elements: Classical architectural relief patterns (faint background), Thin guide lines connecting floating labels to specific items, Small circular nodes at line endpoints, Rounded rectangular pill-shaped tags, Vertical capsule-shaped label on the left edge. Create a square selling-point image with clear visual callouts for: 经典迷彩军服设计，附带武器配件，全套装备刻画，适合军事场景搭配. Use concise original Chinese copy only when legible.",
+      "style_tags": [],
+      "status": "ready",
+      "metadata": {}
+    }
+  ],
+  "global_style": {
+    "primary_color": null,
+    "light_direction": null,
+    "mood": null,
+    "background_type": null
+  },
+  "version": 3,
+  "parent_version": null
+}

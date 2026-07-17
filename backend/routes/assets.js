@@ -7,6 +7,7 @@ import config, { projectRoot } from '../config.js';
 import { authenticateSession } from '../auth/sessionMiddleware.js';
 import { asyncHandler, AppError } from '../middleware/errorHandler.js';
 import createStorageProvider from '../utils/storage.js';
+import { createResilientPool } from '../utils/transientErrors.js';
 
 const storage = createStorageProvider(config.STORAGE_TYPE || 'local');
 
@@ -24,7 +25,7 @@ if (!fs.existsSync(uploadsDir)) {
 // Lazy pool reference — injected by index.js at startup
 let pool;
 export function setPool(p) {
-  pool = p;
+  pool = createResilientPool(p);
 }
 
 // ─── POST /upload ─────────────────────────────────────────────────────────────
@@ -34,7 +35,7 @@ router.post(
   '/upload',
   authenticateSession,
   asyncHandler(async (req, res) => {
-    const { name, data, metrics } = req.body;
+    const { name, data, metrics, client_upload_id: clientUploadId } = req.body;
     const uid = req.user.uid;
 
     if (!data) {
@@ -65,8 +66,20 @@ router.post(
     else if (bytes > 1024) sizeStr = `${Math.round(bytes / 1024)} KB`;
     else sizeStr = `${bytes} B`;
 
+    const validClientUploadId = typeof clientUploadId === 'string' && /^[a-zA-Z0-9-]{8,80}$/.test(clientUploadId)
+      ? clientUploadId
+      : crypto.randomUUID();
+    const assetId = `asset-${validClientUploadId}`;
+    const existing = await pool.query(
+      'SELECT * FROM assets WHERE id = $1 AND uid = $2',
+      [assetId, uid]
+    );
+    if (existing.rowCount > 0) {
+      return res.json({ success: true, asset: existing.rows[0], idempotent: true });
+    }
+
     const ext = path.extname(name) || '.png';
-    const uniqueFileName = `upload_${Date.now()}_${Math.floor(Math.random() * 1000)}${ext}`;
+    const uniqueFileName = `upload_${validClientUploadId}${ext}`;
 
     // A browser can retain a stale local session id after a session is deleted
     // or an account changes. Do not let that optional association break the
@@ -82,23 +95,27 @@ router.post(
 
     // Save binary file using StorageProvider
     const relativeUrl = await storage.saveFile(buffer, uniqueFileName);
-    const assetId = 'asset-' + crypto.randomUUID();
-
-    // Persist asset metadata in DB
-    await pool.query(
-      'INSERT INTO assets (id, uid, name, url, size, date, metrics, source, session_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)',
-      [
-        assetId,
-        uid,
-        name || uniqueFileName,
-        relativeUrl,
-        sizeStr,
-        new Date().toISOString().split('T')[0],
-        metrics ? (typeof metrics === 'string' ? metrics : JSON.stringify(metrics)) : null,
-        'user_uploaded',
-        sessionId
-      ]
-    );
+    try {
+      await pool.query(
+        `INSERT INTO assets (id, uid, name, url, size, date, metrics, source, session_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (id) DO NOTHING`,
+        [
+          assetId,
+          uid,
+          name || uniqueFileName,
+          relativeUrl,
+          sizeStr,
+          new Date().toISOString().split('T')[0],
+          metrics ? (typeof metrics === 'string' ? metrics : JSON.stringify(metrics)) : null,
+          'user_uploaded',
+          sessionId
+        ]
+      );
+    } catch (error) {
+      await storage.deleteFile(relativeUrl).catch(() => {});
+      throw error;
+    }
 
     console.log(`[Assets] Saved asset ${relativeUrl} for user ${uid}.`);
 
@@ -112,6 +129,94 @@ router.post(
         date: new Date().toISOString().split('T')[0],
         metrics: metrics ? (typeof metrics === 'string' ? JSON.parse(metrics) : metrics) : null
       },
+    });
+  })
+);
+
+// ─── POST /image-data ────────────────────────────────────────────────────────
+// Resolve a canvas image through the authenticated backend. This restores
+// region composition for provider URLs that cannot be read by browser canvas
+// because they omit CORS headers.
+router.post(
+  '/image-data',
+  authenticateSession,
+  asyncHandler(async (req, res) => {
+    const source = String(req.body?.url || '').trim();
+    if (!source) throw new AppError('缺少图片地址', 400);
+    if (source.startsWith('data:image/')) {
+      return res.json({ success: true, data_url: source });
+    }
+
+    const assetResult = await pool.query(
+      'SELECT url FROM assets WHERE uid = $1 AND url = $2 LIMIT 1',
+      [req.user.uid, source]
+    );
+    const ownedAsset = assetResult.rowCount > 0;
+    let pathname = source;
+    let remoteUrl = null;
+    if (/^https?:\/\//i.test(source)) {
+      remoteUrl = new URL(source);
+      pathname = remoteUrl.pathname;
+    }
+
+    let buffer;
+    let mimeType = '';
+    const isStoredPath = pathname.startsWith('/uploads/') || pathname.startsWith('/assets/');
+    if (isStoredPath) {
+      try {
+        buffer = await storage.getFileBuffer(pathname);
+      } catch {
+        throw new AppError('素材文件不存在或已被删除，请重新上传', 404);
+      }
+    } else if (remoteUrl) {
+      const configuredHosts = String(process.env.IMAGE_PROXY_ALLOWED_HOSTS || '')
+        .split(',').map(item => item.trim().toLowerCase()).filter(Boolean);
+      const allowedSuffixes = [
+        'volces.com',
+        'aliyuncs.com',
+        'blob.core.windows.net',
+        'amazonaws.com',
+        'r2.dev',
+        ...configuredHosts,
+      ];
+      const hostname = remoteUrl.hostname.toLowerCase();
+      const providerAllowed = allowedSuffixes.some(
+        suffix => hostname === suffix || hostname.endsWith(`.${suffix}`)
+      );
+      if (!ownedAsset && !providerAllowed) {
+        throw new AppError('该图片地址不允许通过合成代理读取', 403);
+      }
+      let response;
+      try {
+        response = await fetch(remoteUrl, { signal: AbortSignal.timeout(20_000) });
+      } catch {
+        throw new AppError('云端图片暂时无法读取，请稍后重试', 502);
+      }
+      if (!response.ok) throw new AppError(`原图读取失败 (HTTP ${response.status})`, 502);
+      mimeType = String(response.headers.get('content-type') || '').split(';')[0];
+      if (mimeType && !mimeType.startsWith('image/')) {
+        throw new AppError('原图地址返回的不是图片', 422);
+      }
+      buffer = Buffer.from(await response.arrayBuffer());
+    } else {
+      throw new AppError('无法识别原图地址', 400);
+    }
+
+    if (!buffer?.length) throw new AppError('原图内容为空', 422);
+    if (buffer.length > 20 * 1024 * 1024) throw new AppError('原图超过 20MB，无法进行框选合成', 413);
+    if (!mimeType) {
+      const lowerPath = pathname.toLowerCase();
+      mimeType = lowerPath.endsWith('.jpg') || lowerPath.endsWith('.jpeg')
+        ? 'image/jpeg'
+        : lowerPath.endsWith('.webp')
+          ? 'image/webp'
+          : lowerPath.endsWith('.gif')
+            ? 'image/gif'
+            : 'image/png';
+    }
+    res.json({
+      success: true,
+      data_url: `data:${mimeType};base64,${buffer.toString('base64')}`,
     });
   })
 );

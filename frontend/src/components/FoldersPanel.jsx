@@ -1,12 +1,35 @@
 // src/components/FoldersPanel.jsx
 import React, { useState, useEffect, useCallback } from 'react';
-import { Folder, FolderOpen, FileImage, Plus, Trash2, Upload, FileCode, Search, ImagePlus, AlertTriangle } from 'lucide-react';
+import { Folder, FolderOpen, FileImage, Plus, Trash2, Upload, FileCode, Search, ImagePlus, AlertTriangle, RefreshCw } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { resolveAssetUrl } from '../lib/utils';
+import { fetchJsonWithRetry } from '../lib/reliableFetch';
+
+const assetCacheKey = (uid) => `asset_warehouse_cache:${uid}`;
+
+function readAssetCache(uid) {
+  if (!uid) return [];
+  try {
+    const cached = JSON.parse(localStorage.getItem(assetCacheKey(uid)) || '[]');
+    return Array.isArray(cached) ? cached : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeAssetCache(uid, assets) {
+  if (!uid) return;
+  try {
+    localStorage.setItem(assetCacheKey(uid), JSON.stringify(assets));
+  } catch {
+    // Storage can be unavailable in privacy mode. The server remains authoritative.
+  }
+}
 
 export default function FoldersPanel({ versions, setVersions, onSelectAsset }) {
   const auth = useAuth();
-  const token = auth?.token;
+  const { currentUser, isAuthenticated, isAuthLoading } = auth;
+  const userId = currentUser?.uid || currentUser?.id;
 
   const [activeCategory, setActiveCategory] = useState('all'); // 'all' | 'ai_generated' | 'user_uploaded'
   const [editingId, setEditingId] = useState(null);
@@ -15,25 +38,52 @@ export default function FoldersPanel({ versions, setVersions, onSelectAsset }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [assets, setAssets] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [brokenAssets, setBrokenAssets] = useState(new Set());
 
   // Fetch assets from server
   const fetchAssets = useCallback(async () => {
-    setLoading(true);
+    if (isAuthLoading) return;
+    if (!isAuthenticated || !userId) {
+      setLoading(false);
+      setLoadError('登录状态尚未恢复，暂时无法读取素材。');
+      return;
+    }
+
+    const cachedAssets = readAssetCache(userId);
+    if (cachedAssets.length > 0) {
+      setAssets((current) => current.length > 0 ? current : cachedAssets);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
+    setLoadError('');
     try {
-      const res = await fetch('/api/assets/', {
+      const { response, data } = await fetchJsonWithRetry('/api/assets', {
         credentials: 'include'
+      }, {
+        attempts: 4,
+        timeoutMs: 30000,
       });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        setAssets(data.assets || []);
+      if (response.ok && data.success) {
+        const nextAssets = Array.isArray(data.assets) ? data.assets : [];
+        setAssets(nextAssets);
+        setBrokenAssets(new Set());
+        writeAssetCache(userId, nextAssets);
+        return;
       }
+
+      const message = response.status === 401 || response.status === 403
+        ? '登录状态已失效，请重新登录后重试。'
+        : data.message || data.error || data.detail || '素材库暂时加载失败，请重试。';
+      setLoadError(message);
     } catch (err) {
       console.warn('Failed to fetch assets:', err);
+      setLoadError('网络连接不稳定，素材数据仍然保留，可点击重试。');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [isAuthenticated, isAuthLoading, userId]);
 
   useEffect(() => {
     fetchAssets();
@@ -185,6 +235,44 @@ export default function FoldersPanel({ versions, setVersions, onSelectAsset }) {
         </div>
 
         {/* Files Grid */}
+        {loadError && (
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '12px',
+            padding: '10px 12px',
+            borderRadius: '8px',
+            background: 'rgba(224, 85, 85, 0.08)',
+            border: '1px solid rgba(224, 85, 85, 0.22)',
+            color: 'var(--on-surface)',
+            fontSize: '0.76rem'
+          }} role="alert">
+            <span style={{ display: 'flex', alignItems: 'center', gap: '7px' }}>
+              <AlertTriangle size={15} color="#e05555" />
+              {loadError}
+            </span>
+            <button
+              type="button"
+              onClick={fetchAssets}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '5px',
+                flexShrink: 0,
+                padding: '5px 9px',
+                borderRadius: '6px',
+                border: '1px solid var(--outline-variant)',
+                background: 'var(--surface)',
+                color: 'var(--primary)',
+                cursor: 'pointer',
+                fontWeight: 600
+              }}
+            >
+              <RefreshCw size={13} /> 重试
+            </button>
+          </div>
+        )}
         {loading ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 1, color: 'var(--text-muted)', fontSize: '0.85rem' }}>
             加载中...
@@ -198,8 +286,8 @@ export default function FoldersPanel({ versions, setVersions, onSelectAsset }) {
           }}>
             {filteredItems.length === 0 ? (
               <div style={{ gridColumn: '1 / -1', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '200px', color: 'var(--text-muted)', fontSize: '0.8rem', gap: '8px' }}>
-                <FileCode size={32} style={{ opacity: 0.3 }} />
-                <span>本分类下暂无文件</span>
+                {loadError ? <AlertTriangle size={32} style={{ opacity: 0.5 }} /> : <FileCode size={32} style={{ opacity: 0.3 }} />}
+                <span>{loadError ? '素材暂未加载成功，文件没有被删除' : '本分类下暂无文件'}</span>
               </div>
             ) : (
               filteredItems.map(item => (

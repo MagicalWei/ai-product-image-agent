@@ -111,6 +111,8 @@ def map_aspect_ratio_to_size(ratio: str) -> str:
         return "1440x2560"
     elif ratio == "4:3":
         return "2240x1680"
+    elif ratio == "3:4":
+        return "1728x2304"
     elif ratio == "3:2":
         return "2400x1600"
     else:

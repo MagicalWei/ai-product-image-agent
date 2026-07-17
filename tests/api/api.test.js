@@ -13,6 +13,7 @@ let verificationCode;
 let sessionCookie = '';
 let testUid;
 let uploadedAsset;
+let styleReferenceAsset;
 let designSessionId;
 let fakeAgentServer;
 let capturedAgentBody;
@@ -200,30 +201,58 @@ describe.sequential('registered user API journey', () => {
   });
 
   it('creates a product design session', async () => {
+    const clientSessionId = `session-${crypto.randomUUID()}`;
+    const body = JSON.stringify({ title: '商品图回归会话', client_session_id: clientSessionId });
     const response = await request('/api/agent/sessions', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ title: '商品图回归会话' }),
+      body,
     });
     expect(response.status).toBe(200);
     designSessionId = (await response.json()).session.session_id;
-    expect(designSessionId).toMatch(/^session-/);
+    expect(designSessionId).toBe(clientSessionId);
+
+    const repeated = await request('/api/agent/sessions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    });
+    expect(repeated.status).toBe(200);
+    expect((await repeated.json()).session.session_id).toBe(clientSessionId);
   });
 
   it('uploads, lists, counts, and deletes a cloud asset', async () => {
     const onePixelPng = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+    const clientUploadId = crypto.randomUUID();
+    const uploadBody = JSON.stringify({
+      name: 'journey.png',
+      data: onePixelPng,
+      session_id: designSessionId,
+      client_upload_id: clientUploadId,
+    });
     const upload = await request('/api/assets/upload', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: 'journey.png', data: onePixelPng, session_id: designSessionId }),
+      body: uploadBody,
     });
     expect(upload.status, await upload.clone().text()).toBe(200);
     uploadedAsset = (await upload.json()).asset;
     expect(uploadedAsset.url).toMatch(/^\/uploads\//);
 
+    const repeatedUpload = await request('/api/assets/upload', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: uploadBody,
+    });
+    expect(repeatedUpload.status).toBe(200);
+    const repeatedData = await repeatedUpload.json();
+    expect(repeatedData.idempotent).toBe(true);
+    expect(repeatedData.asset.id).toBe(uploadedAsset.id);
+
     const list = await request('/api/assets');
     expect(list.status).toBe(200);
-    expect((await list.json()).assets.some((asset) => asset.id === uploadedAsset.id)).toBe(true);
+    const listedAssets = (await list.json()).assets;
+    expect(listedAssets.filter((asset) => asset.id === uploadedAsset.id)).toHaveLength(1);
 
     const stats = await request('/api/assets/stats');
     expect(stats.status).toBe(200);
@@ -297,6 +326,68 @@ describe.sequential('registered user API journey', () => {
     expect(history.slice(-2)).toEqual([
       { role: 'user', content: '开始新设计' },
       { role: 'assistant', content: '已开始新的设计，之前的对话仍然保留。' },
+    ]);
+  });
+
+  it('persists a style reference and restores it for a later Agent turn', async () => {
+    const styleDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+    const upload = await request('/api/assets/upload', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'style-reference.png',
+        data: styleDataUrl,
+        session_id: designSessionId,
+        client_upload_id: crypto.randomUUID(),
+        metrics: { asset_role: 'style_reference' },
+      }),
+    });
+    expect(upload.status, await upload.clone().text()).toBe(200);
+    styleReferenceAsset = (await upload.json()).asset;
+
+    const firstTurn = await request('/api/agent/chat-stream', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        session_id: designSessionId,
+        message: '按照参考风格生成一张卖点图',
+        style_transfer_mode: true,
+        style_reference_images: [styleDataUrl],
+        message_images: [{
+          id: styleReferenceAsset.id,
+          name: styleReferenceAsset.name,
+          url: styleReferenceAsset.url,
+          role: 'style_reference',
+        }],
+      }),
+    });
+    expect(firstTurn.status, await firstTurn.clone().text()).toBe(200);
+    await firstTurn.text();
+    expect(capturedAgentBody.style_reference_images).toEqual([styleDataUrl]);
+    expect(capturedAgentBody.agent_memory.style_reference_image_urls).toEqual([
+      styleReferenceAsset.url,
+    ]);
+
+    const laterTurn = await request('/api/agent/chat-stream', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        session_id: designSessionId,
+        message: '再生成一张同风格详情图',
+      }),
+    });
+    expect(laterTurn.status, await laterTurn.clone().text()).toBe(200);
+    await laterTurn.text();
+    expect(capturedAgentBody.style_reference_images).toHaveLength(1);
+    expect(capturedAgentBody.style_reference_images[0]).toMatch(/^data:image\/png;base64,/);
+    expect(capturedAgentBody.agent_memory).toMatchObject({
+      style_reference_image_urls: [styleReferenceAsset.url],
+      reference_images_intent: 'style_transfer',
+    });
+
+    const restored = await request(`/api/agent/sessions/${designSessionId}`);
+    expect((await restored.json()).session.agent_memory.style_reference_image_urls).toEqual([
+      styleReferenceAsset.url,
     ]);
   });
 

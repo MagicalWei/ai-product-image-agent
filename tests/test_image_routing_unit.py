@@ -2,6 +2,7 @@ import unittest
 
 from agent.image_routing import (
     build_seedream_edit_prompt,
+    is_attachment_receipt_question,
     parse_direct_image_request,
 )
 from agent.multi_agent.agents.image_generator import ImageGeneratorAgent
@@ -29,6 +30,18 @@ class ImageRoutingTests(unittest.TestCase):
         self.assertIn("只修改矩形框内", expanded)
         self.assertIn("框外", expanded)
         self.assertIn("移除彩色矩形框", expanded)
+
+    def test_internal_attachment_context_is_removed_from_user_prompt(self):
+        direct, region, prompt = parse_direct_image_request(
+            "[[DIRECT_IMAGE_AGENT_REGION]]\n[系统] 已附加框选图\n[用户指令]\n修改字体"
+        )
+        self.assertTrue(direct)
+        self.assertTrue(region)
+        self.assertEqual(prompt, "修改字体")
+
+    def test_attachment_receipt_question_is_detected(self):
+        self.assertTrue(is_attachment_receipt_question("看到我发你的图片了吗"))
+        self.assertFalse(is_attachment_receipt_question("把图片里的字体改一下"))
 
     def test_force_image_agent_always_uses_attachment(self):
         agent = ImageGeneratorAgent({}, {})

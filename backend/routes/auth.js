@@ -1,13 +1,14 @@
 import { Router } from 'express';
 import { authenticateSession, optionalSessionAuth } from '../auth/sessionMiddleware.js';
 import { asyncHandler, AppError } from '../middleware/errorHandler.js';
+import { createResilientPool } from '../utils/transientErrors.js';
 
 const router = Router();
 
 // Lazy pool instance
 let pool;
 export function setPool(p) {
-  pool = p;
+  pool = createResilientPool(p);
 }
 
 // ─── POST /sync-keys ──────────────────────────────────────────────────────────

@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 import asyncio
+from unittest.mock import AsyncMock
 
 from agent.core.loop import SenseDecideActReviewLoop
 from agent.intent.brief_parser import apply_requirement_reply
@@ -37,9 +38,18 @@ def test_confirmed_product_reply_does_not_clarify_again_and_keeps_image():
         build_llm_context=lambda: "已确认商品和卖点",
     )
     loop = SenseDecideActReviewLoop.__new__(SenseDecideActReviewLoop)
+    loop._call_sense_llm = AsyncMock(return_value={
+        "intent": "continue_generation",
+        "slots": {
+            "style_preference": "自然场景",
+            "image_types": ["selling_point"],
+        },
+        "needs_clarification": False,
+        "clarification_questions": [],
+    })
 
     brief, _context, clarification_needed = asyncio.run(
-        loop._sense("自然场景，卖点图", memory, "encoded-product-image", None)
+        loop._sense("自然场景，卖点图", memory, "encoded-product-image", None, {})
     )
 
     assert clarification_needed is False

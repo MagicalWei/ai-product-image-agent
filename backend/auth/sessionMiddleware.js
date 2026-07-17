@@ -1,5 +1,22 @@
 import { auth } from './betterAuth.js';
 import { getPool } from '../db/db.js';
+import { isTransientDatabaseError } from '../utils/transientErrors.js';
+
+async function getSessionWithRetry(headers) {
+  let lastError;
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    try {
+      return await auth.api.getSession({ headers });
+    } catch (error) {
+      lastError = error;
+      if (attempt < 4) {
+        await new Promise((resolve) => setTimeout(resolve, 250 * (2 ** (attempt - 1))));
+      }
+    }
+  }
+  lastError.authServiceFailure = true;
+  throw lastError;
+}
 
 /**
  * authenticateSession — replaces old authenticateToken.
@@ -10,9 +27,7 @@ import { getPool } from '../db/db.js';
  */
 export async function authenticateSession(req, res, next) {
   try {
-    const session = await auth.api.getSession({
-      headers: req.headers,
-    });
+    const session = await getSessionWithRetry(req.headers);
 
     if (!session || !session.user) {
       return res.status(401).json({ error: '请先登录，未检测到认证令牌' });
@@ -40,6 +55,13 @@ export async function authenticateSession(req, res, next) {
     next();
   } catch (err) {
     console.error('[authenticateSession] Error:', err.message);
+    if (err.authServiceFailure || isTransientDatabaseError(err)) {
+      return res.status(503).json({
+        error: '登录状态服务正在恢复，请稍后重试',
+        code: 'AUTH_SERVICE_TEMPORARY_UNAVAILABLE',
+        retryable: true,
+      });
+    }
     return res.status(401).json({ error: '认证令牌无效或已过期，请重新登录' });
   }
 }
@@ -52,9 +74,7 @@ export async function authenticateSession(req, res, next) {
  */
 export async function optionalSessionAuth(req, res, next) {
   try {
-    const session = await auth.api.getSession({
-      headers: req.headers,
-    });
+    const session = await getSessionWithRetry(req.headers);
 
     if (session && session.user) {
       const user = session.user;

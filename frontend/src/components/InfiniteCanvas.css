@@ -1093,12 +1093,53 @@
   margin-bottom: 8px;
 }
 
+.sidebar-msg__attachment-preview {
+  position: relative;
+  width: 64px;
+  height: 64px;
+}
+
+.sidebar-msg__attachment-preview span {
+  position: absolute;
+  left: 3px;
+  bottom: 3px;
+  max-width: 58px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.68);
+  color: #fff;
+  font-size: 0.52rem;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .sidebar-msg__attachment-thumb {
+  display: block;
   width: 64px;
   height: 64px;
   object-fit: cover;
   border-radius: 8px;
   border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.sidebar-msg__attachment-fallback {
+  width: 64px;
+  height: 64px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border-radius: 8px;
+  border: 1px dashed rgba(0, 0, 0, 0.18);
+  background: rgba(255, 255, 255, 0.55);
+  color: var(--on-surface-variant);
+}
+
+.sidebar-msg__attachment-fallback small {
+  font-size: 0.5rem;
 }
 
 [data-theme='dark'] .sidebar-msg__attachment-thumb {
@@ -1227,9 +1268,13 @@
   cursor: not-allowed;
 }
 
-/* 图片隐藏（已在画布中） */
-.sidebar-msg__bubble img {
+/* 旧的画布结果图不在对话中重复展示；用户发送的附件缩略图必须可见。 */
+.sidebar-msg__bubble img:not(.sidebar-msg__attachment-thumb) {
   display: none;
+}
+
+.sidebar-msg__bubble img.sidebar-msg__attachment-thumb {
+  display: block;
 }
 
 /* ===== 浮动批注面板 (Floating Comments Accordion) ===== */
@@ -1274,5 +1319,3 @@
     width: 240px;
   }
 }
-
-

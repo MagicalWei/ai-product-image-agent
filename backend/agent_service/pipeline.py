@@ -137,9 +137,11 @@ async def run_pipeline_stream(inputs: Dict[str, Any]):
             image_model_key=image_model_key,
             rag_retriever=rag_retriever,
             product_image_base64=inputs.get("product_image_base64", ""),
+            reference_images=inputs.get("reference_images", []),
             style_reference_images=inputs.get("style_reference_images", []),
             style_transfer_mode=inputs.get("style_transfer_mode", False),
             product_set_mode=inputs.get("product_set_mode", False),
+            session_id=inputs.get("session_id", ""),
         ):
             yield event
     elif AGENT_ARCHITECTURE == "multi-agent":
@@ -177,9 +179,11 @@ async def _run_new_loop(
     image_model_key: str,
     rag_retriever: Any = None,
     product_image_base64: str = "",
+    reference_images: list[str] | None = None,
     style_reference_images: list[str] | None = None,
     style_transfer_mode: bool = False,
     product_set_mode: bool = False,
+    session_id: str = "",
 ):
     """Run the new sense-decide-act-review loop."""
     # Ensure project root is in path for agent imports
@@ -192,6 +196,7 @@ async def _run_new_loop(
     from agent.actions.handlers import register_all_actions
     from agent.assets.store import AssetStore
     from agent.canvas.state import CanvasStateManager
+    from agent.canvas.identity import build_agent_canvas_id
     from agent.canvas.version_tree import VersionTree
     from agent.actions.registry import ACTION_REGISTRY
     from agent.core.loop import SenseDecideActReviewLoop
@@ -203,7 +208,7 @@ async def _run_new_loop(
 
     # Try loading existing canvas state from asset store for
     # cross-request persistence (keyed by session/product).
-    session_canvas_id = f"canvas_{memory.product_name}" if memory.product_name else None
+    session_canvas_id = build_agent_canvas_id(session_id, memory.product_name)
     if session_canvas_id:
         canvas_mgr.load_from_asset_store(session_canvas_id, asset_store)
 
@@ -227,6 +232,7 @@ async def _run_new_loop(
         message=message,
         memory=memory,
         product_image_base64=product_image_base64,
+        reference_images=reference_images or [],
         style_reference_images=style_reference_images or [],
         style_transfer_mode=style_transfer_mode,
         product_set_mode=product_set_mode,

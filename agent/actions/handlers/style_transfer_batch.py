@@ -59,6 +59,17 @@ async def style_transfer_batch_fn(params: ActionParams, canvas: CanvasState) -> 
     if not product_image or not style_images:
         return ActionResult(success=False, error="产品图和风格参考图均不能为空")
 
+    supported_types = {"main", "selling_point", "detail"}
+    requested_types = [
+        image_type for image_type in (extra.get("image_types") or [])
+        if image_type in supported_types
+    ]
+    if not requested_types:
+        return ActionResult(
+            success=False,
+            error="未选择有效的风格迁移图片类型，可选 main、selling_point、detail",
+        )
+
     style = await _analyze_style(style_images[0], extra.get("multimodal_config", {}) or {})
     style_text = _style_summary(style)
     product_name = extra.get("product_name", "新产品")
@@ -69,10 +80,14 @@ async def style_transfer_batch_fn(params: ActionParams, canvas: CanvasState) -> 
         "logo, trademark, text or distinctive props. The final image must feature only IMAGE 1's product. "
         f"Product: {product_name}. Transferable style: {style_text}. "
     )
-    prompts = {
+    all_prompts = {
         "main": common + "Create a premium square e-commerce hero main image, strong product focus, clean hierarchy, no copied text or logos.",
         "selling_point": common + f"Create a square selling-point image with clear visual callouts for: {selling_points or 'visible product advantages'}. Use concise original Chinese copy only when legible.",
         "detail": common + f"Create a vertical product detail image with close-up feature storytelling and structured information sections for: {selling_points or 'visible product details'}. Use original layout and copy.",
+    }
+    prompts = {
+        image_type: all_prompts[image_type]
+        for image_type in requested_types
     }
     references = [product_image, style_images[0]]
 
@@ -85,7 +100,7 @@ async def style_transfer_batch_fn(params: ActionParams, canvas: CanvasState) -> 
             image_model_key=extra.get("image_model_key", ""),
             negative_prompt=extra.get("negative_prompt", ""),
             aspect_ratio="3:4" if image_type == "detail" else "1:1",
-            size_doubao="1440x1920" if image_type == "detail" else "1920x1920",
+            size_doubao="1728x2304" if image_type == "detail" else "1920x1920",
         ), canvas)
         return image_type, result
 

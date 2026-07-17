@@ -18,7 +18,7 @@ async def generate_product_set_fn(params: ActionParams, canvas: CanvasState) -> 
         return ActionResult(success=False, error="商品图不能为空")
 
     requested = [
-        image_type for image_type in (extra.get("image_types") or SUPPORTED_IMAGE_TYPES)
+        image_type for image_type in (extra.get("image_types") or [])
         if image_type in SUPPORTED_IMAGE_TYPES
     ]
     requested = list(dict.fromkeys(requested))
@@ -50,7 +50,9 @@ async def generate_product_set_fn(params: ActionParams, canvas: CanvasState) -> 
             image_model_key=extra.get("image_model_key", ""),
             negative_prompt=extra.get("negative_prompt", ""),
             aspect_ratio="3:4" if is_detail else "1:1",
-            size_doubao="1440x1920" if is_detail else "1920x1920",
+            # Seedream requires at least 3,686,400 output pixels. 1440x1920
+            # looks like 3:4 but is rejected by the API (2,764,800 pixels).
+            size_doubao="1728x2304" if is_detail else "1920x1920",
         ), canvas)
         return image_type, result
 

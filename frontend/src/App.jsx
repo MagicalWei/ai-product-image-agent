@@ -9,7 +9,8 @@ import Sidebar from './components/Sidebar';
 import { evaluateImageWithGemini, isValidApiKeyFormat } from './utils/geminiEvaluator';
 import { removeBackground } from '@imgly/background-removal';
 import { resolveAssetUrl } from './lib/utils';
-import { routeMessageForAttachments } from './lib/imageAgentRouting';
+import { fetchJsonWithRetry } from './lib/reliableFetch';
+import { resolveAttachmentImageRoles, routeMessageForAttachments } from './lib/imageAgentRouting';
 
 // Lazy-loaded components for code splitting
 const DashboardPanel = React.lazy(() => import('./components/DashboardPanel'));
@@ -219,6 +220,7 @@ function AppInner() {
   // ---- Local UI state (component-specific, not shared via context) ----
   const [showLayersPanel, setShowLayersPanel] = useState(false);
   const [chatInputValue, setChatInputValue] = useState('');
+  const [typingStatus, setTypingStatus] = useState('正在理解需求…');
 
   // OSS Hero splash — show once per session (localStorage flag)
   const [showOssHero, setShowOssHero] = useState(() => {
@@ -288,6 +290,8 @@ function AppInner() {
 
   // 画布图片 → 对话框附件
   const [attachedImages, setAttachedImages] = useState([]);
+  const attachedImagesRef = useRef([]);
+  const attachmentUploadPromisesRef = useRef(new Map());
 
   const [syncFidelity, setSyncFidelity] = useState(true);
 
@@ -342,6 +346,7 @@ function AppInner() {
   const [currentQuickTool, setCurrentQuickTool] = useState(null);
   const [showDetailGeneratorModal, setShowDetailGeneratorModal] = useState(false);
   const [detailUploadBase64, setDetailUploadBase64] = useState('');
+  const [quickToolStarting, setQuickToolStarting] = useState('');
   
   // Set generator (商品套图) states
   const [showSetGeneratorModal, setShowSetGeneratorModal] = useState(false);
@@ -901,18 +906,80 @@ function AppInner() {
     activeSessionIdRef.current = sessionId;
     setCurrentSessionId(sessionId);
     setCanvasProductImageBase64(productImg);
-    const uploads = [addUploadedAsset(`${title}_商品图.png`, productImg, 'raw')];
-    if (styleRefImg) uploads.push(addUploadedAsset(`${title}_风格参考图.png`, styleRefImg, 'style_reference'));
-    await Promise.allSettled(uploads);
+    const productUpload = addUploadedAsset(`${title}_商品图.png`, productImg, 'raw');
+    let styleReferenceAsset = null;
+    if (styleRefImg) {
+      // A style-transfer session must not start with a transient data URL:
+      // otherwise the first turn works but refresh/follow-up loses the style.
+      styleReferenceAsset = await addUploadedAsset(
+        `${title}_风格参考图.png`,
+        styleRefImg,
+        'style_reference',
+      );
+      if (!styleReferenceAsset.url || styleReferenceAsset.url.startsWith('data:')) {
+        throw new Error('风格参考图云端同步失败，请重新上传后再试');
+      }
+    }
+    // Product generation still receives productImg directly. Keep its upload
+    // concurrent with setup so the style-reference reliability fix does not
+    // add another serial wait.
+    void productUpload;
+
+    // The quick-tool source image is also a real canvas layer. Persist a
+    // mount-ready snapshot before navigating so it is visible immediately,
+    // even while the generation request is still running.
+    const dimensions = await new Promise((resolve) => {
+      const image = new Image();
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve(value);
+      };
+      const timeout = setTimeout(() => finish({ width: 420, height: 420 }), 1500);
+      image.onload = () => finish({
+        width: image.naturalWidth || 420,
+        height: image.naturalHeight || 420,
+      });
+      image.onerror = () => finish({ width: 420, height: 420 });
+      image.src = productImg;
+    });
+    const scale = Math.min(1, 520 / Math.max(dimensions.width, dimensions.height));
+    const width = Math.round(dimensions.width * scale);
+    const height = Math.round(dimensions.height * scale);
+    const sourceElement = {
+      id: `quick-tool-product-${Date.now()}`,
+      type: 'image',
+      x: -width / 2,
+      y: -height / 2,
+      width,
+      height,
+      url: productImg,
+      name: `${title}商品原图`,
+      source: 'user_uploaded',
+      imageType: 'source',
+    };
+    const sourceCanvasState = {
+      elements: [sourceElement],
+      camera: { x: 400, y: 300, zoom: 1.0 },
+    };
+    try {
+      localStorage.setItem('infinite_canvas_elements', JSON.stringify(sourceCanvasState.elements));
+      localStorage.setItem('infinite_canvas_camera', JSON.stringify(sourceCanvasState.camera));
+    } catch (error) {
+      console.warn('快捷工具商品图写入本地画布失败:', error);
+    }
+    void saveCanvasState(sessionId, sourceCanvasState);
     setView('workspace');
-    return sessionId;
+    return { sessionId, styleReferenceAsset };
   };
 
   const handleGenerateSet = async (productImg, chosenStyleId, selectedTypes) => {
     if (!productImg) return showError('请先上传商品图');
     if (!selectedTypes.length) return showError('请至少选择一种套图类型');
     try {
-      const sessionId = await prepareQuickToolSession({ title: '商品套图', productImg });
+      const { sessionId } = await prepareQuickToolSession({ title: '商品套图', productImg });
       setShowSetGeneratorModal(false);
       await handleSendMessage(
         `基于上传的商品图生成商品套图，视觉风格为 ${chosenStyleId}。`,
@@ -936,7 +1003,11 @@ function AppInner() {
     if (!styleRefImg) return showError('请先上传爆款参考图');
     if (!myProductImg) return showError('请先上传新的商品图');
     try {
-      const sessionId = await prepareQuickToolSession({ title: '爆款图复刻', productImg: myProductImg, styleRefImg });
+      const { sessionId, styleReferenceAsset } = await prepareQuickToolSession({
+        title: '爆款图复刻',
+        productImg: myProductImg,
+        styleRefImg,
+      });
       setShowCopyGeneratorModal(false);
       await handleSendMessage(
         promptVal?.trim() || '按照参考图的视觉风格，为新商品生成主图、卖点图和详情图。',
@@ -948,7 +1019,12 @@ function AppInner() {
           style_reference_images: [styleRefImg],
           style_transfer_mode: true,
           message_images: [
-            { url: styleRefImg, name: '爆款参考图' },
+            {
+              id: styleReferenceAsset.id,
+              url: styleReferenceAsset.url,
+              name: '爆款参考图',
+              role: 'style_reference',
+            },
             { url: myProductImg, name: '新商品图' },
           ],
           reset_conversation: true,
@@ -967,14 +1043,17 @@ function AppInner() {
   const handleGenerateDetailPage = async (productImg, points, styleVal, aspectVal) => {
     if (!productImg) return showError('请先上传商品图');
     if (!points.trim()) return showError('请填写商品品类或卖点');
+    if (quickToolStarting) return;
+    setQuickToolStarting('detail');
     try {
-      const sessionId = await prepareQuickToolSession({ title: 'A+详情页', productImg });
+      const { sessionId } = await prepareQuickToolSession({ title: 'A+详情页', productImg });
       setShowDetailGeneratorModal(false);
       await handleSendMessage(
         `为商品制作 A+/详情页。商品信息与卖点：${points}`,
         null,
         {
           session_id: sessionId,
+          product_name: points.trim().split(/[，。；,;\n]/)[0].slice(0, 80),
           product_image_base64: productImg,
           image_types: ['detail'],
           product_set_mode: true,
@@ -987,6 +1066,8 @@ function AppInner() {
       );
     } catch (err) {
       showError(err.message || 'A+/详情页生成启动失败');
+    } finally {
+      setQuickToolStarting('');
     }
   };
 
@@ -1672,20 +1753,46 @@ function AppInner() {
     }
   };
 
+  const replaceAttachedImages = (nextImages) => {
+    attachedImagesRef.current = nextImages;
+    setAttachedImages(nextImages);
+  };
+
+  const updateAttachedImages = (updater) => {
+    const nextImages = typeof updater === 'function' ? updater(attachedImagesRef.current) : updater;
+    replaceAttachedImages(nextImages);
+    return nextImages;
+  };
+
   const handleAttachImageToChat = (imageEl) => {
-    setAttachedImages(prev => {
-      if (prev.find(img => img.id === imageEl.id)) return prev;
-      return [...prev, {
+    const nextImages = attachedImagesRef.current.find(img => img.id === imageEl.id)
+      ? attachedImagesRef.current
+      : [...attachedImagesRef.current, {
         ...imageEl,
         id: imageEl.id,
         url: imageEl.url,
         name: imageEl.name || '图片',
+        upload_status: imageEl.url?.startsWith('data:') ? 'uploading' : 'ready',
       }];
-    });
+    replaceAttachedImages(nextImages);
+
+    if (imageEl.url?.startsWith('data:')) {
+      const uploadPromise = addUploadedAsset(imageEl.name || '框选图片.png', imageEl.url, 'chat_attachment')
+        .then((asset) => {
+          updateAttachedImages(current => current.map(image => image.id === imageEl.id ? {
+            ...image,
+            url: asset.url || image.url,
+            upload_status: asset.url && !asset.url.startsWith('data:') ? 'ready' : 'local_only',
+          } : image));
+          return asset;
+        })
+        .finally(() => attachmentUploadPromisesRef.current.delete(imageEl.id));
+      attachmentUploadPromisesRef.current.set(imageEl.id, uploadPromise);
+    }
   };
 
   const handleRemoveAttachedImage = (id) => {
-    setAttachedImages(prev => prev.filter(img => img.id !== id));
+    updateAttachedImages(prev => prev.filter(img => img.id !== id));
   };
 
   const handleAddStyleReference = async (file) => {
@@ -1696,11 +1803,22 @@ function AppInner() {
       reader.onerror = reject;
       reader.readAsDataURL(file);
     });
-    const asset = await addUploadedAsset(file.name, base64, 'style_reference');
-    setAttachedImages(prev => [
+    const attachmentId = `style-${globalThis.crypto?.randomUUID?.() || Date.now()}`;
+    updateAttachedImages(prev => [
       ...prev.filter(img => img.role !== 'style_reference'),
-      { id: asset.id || `style-${Date.now()}`, name: file.name, url: asset.url || base64, role: 'style_reference' },
+      { id: attachmentId, name: file.name, url: base64, role: 'style_reference', upload_status: 'uploading' },
     ]);
+    const uploadPromise = addUploadedAsset(file.name, base64, 'style_reference')
+      .then((asset) => {
+        updateAttachedImages(current => current.map(image => image.id === attachmentId ? {
+          ...image,
+          url: asset.url || image.url,
+          upload_status: asset.url && !asset.url.startsWith('data:') ? 'ready' : 'local_only',
+        } : image));
+        return asset;
+      })
+      .finally(() => attachmentUploadPromisesRef.current.delete(attachmentId));
+    attachmentUploadPromisesRef.current.set(attachmentId, uploadPromise);
   };
 
   // ── Product image analysis on canvas drop/import ──
@@ -1732,7 +1850,7 @@ function AppInner() {
     setIsAnalyzingProductImage(true);
     setProductImageAnalysis(null);
     setProductAnalysisSource({ base64Url, fileName });
-    const messageId = existingMessageId || `product-analysis-${Date.now()}`;
+    const messageId = existingMessageId || `product-analysis-${activeSessionId}`;
     setChatMessages(prev => {
       const loadingMessage = {
         id: messageId,
@@ -1844,6 +1962,8 @@ function AppInner() {
       return;
     }
     agentRequestInFlightRef.current = true;
+    const requestSessionId = options.session_id || currentSessionId;
+    const initialAttachments = (options.attachments || attachedImagesRef.current).map(image => ({ ...image }));
 
     let creditOk = false;
     try {
@@ -1857,16 +1977,41 @@ function AppInner() {
       agentRequestInFlightRef.current = false;
       return;
     }
-    const updatedMessages = [
-      ...(options.reset_conversation ? [] : chatMessages),
-      {
-        sender: 'user',
-        text,
-        images: options.message_images || attachedImages.map(img => ({ url: img.url, name: img.name || '图片' })),
-      },
-    ];
-    setChatMessages(updatedMessages);
+    const turnId = `user-turn-${globalThis.crypto?.randomUUID?.() || Date.now()}`;
+    const localMessageImages = options.message_images || initialAttachments.map(img => ({
+      id: img.id,
+      url: img.url,
+      name: img.name || '图片',
+      role: img.role,
+      kind: img.kind,
+    }));
+    setChatMessages(prev => [
+      ...(options.reset_conversation ? [] : prev),
+      { id: turnId, sender: 'user', text, images: localMessageImages },
+    ]);
     setIsTyping(true);
+    setTypingStatus('正在理解需求…');
+
+    const pendingAttachmentUploads = initialAttachments
+      .map(image => attachmentUploadPromisesRef.current.get(image.id))
+      .filter(Boolean);
+    if (pendingAttachmentUploads.length > 0) {
+      setTypingStatus('正在准备并上传参考图片…');
+      await Promise.allSettled(pendingAttachmentUploads);
+    }
+    const attachmentsForTurn = initialAttachments.map(image => (
+      attachedImagesRef.current.find(current => current.id === image.id) || image
+    ));
+    setChatMessages(prev => prev.map(message => message.id === turnId ? {
+      ...message,
+      images: options.message_images || attachmentsForTurn.map(img => ({
+        id: img.id,
+        url: img.url,
+        name: img.name || '图片',
+        role: img.role,
+        kind: img.kind,
+      })),
+    } : message));
 
     const hasInpaintMask = customMaskData ? true : (canvasPanelRef.current?.hasMask?.() || false);
     let inpaintMaskData = customMaskData || (hasInpaintMask ? canvasPanelRef.current?.getMaskDataUrl?.() : null);
@@ -1887,7 +2032,7 @@ function AppInner() {
     // An image intentionally placed above the composer is a generation/edit
     // input, not an analysis-only upload. The control marker is stripped by
     // the image Agent and forces a single image-to-image generation turn.
-    enhancedText = routeMessageForAttachments(enhancedText, attachedImages);
+    enhancedText = routeMessageForAttachments(enhancedText, attachmentsForTurn);
 
     const currentVer = versions[currentVersionIndex];
 
@@ -1910,6 +2055,13 @@ function AppInner() {
 
     try {
       setIsGenerating(true);
+      const unsyncedStyleReferences = attachmentsForTurn.filter(image => (
+        image.role === 'style_reference'
+        && (image.upload_status === 'local_only' || image.url?.startsWith('data:'))
+      ));
+      if (currentUser && unsyncedStyleReferences.length > 0) {
+        throw new Error('风格参考图尚未同步到云端，已为你保留附件。请等待同步成功或重新上传后再发送。');
+      }
 
       let currentCutout = productCutout;
       if (!currentCutout && productImage) {
@@ -1938,9 +2090,9 @@ function AppInner() {
 
       // 将附件图片 URL 转为 base64
       let attachedImageBase64List = [];
-      if (attachedImages.length > 0) {
+      if (attachmentsForTurn.length > 0) {
         attachedImageBase64List = await Promise.all(
-          attachedImages.map(async (img) => {
+          attachmentsForTurn.map(async (img) => {
             try {
               const resp = await fetch(img.url);
               const blob = await resp.blob();
@@ -1955,30 +2107,42 @@ function AppInner() {
             }
           })
         );
-        attachedImageBase64List = attachedImageBase64List.filter(Boolean);
+        const failedAttachments = attachmentsForTurn.filter((_, index) => !attachedImageBase64List[index]);
+        if (failedAttachments.length > 0) {
+          const names = failedAttachments.map(image => image.name || '未命名图片').join('、');
+          throw new Error(`参考图片读取失败，未发送给模型：${names}`);
+        }
       }
 
       // 取第一张附件作为 product_image_base64（保持向后兼容）
-      const styleReferenceIndexes = attachedImages
-        .map((image, index) => image.role === 'style_reference' ? index : -1)
-        .filter(index => index >= 0);
-      const attachedStyleReferenceImages = styleReferenceIndexes.map(index => attachedImageBase64List[index]).filter(Boolean);
+      const establishedProductImage = options.product_image_base64 || canvasProductImageBase64 || productImage || null;
+      const attachmentRoles = resolveAttachmentImageRoles({
+        attachments: attachmentsForTurn,
+        encodedImages: attachedImageBase64List,
+        establishedProductImage,
+      });
+      const attachedStyleReferenceImages = attachmentRoles.styleReferenceImages;
       const styleReferenceImages = options.style_reference_images || attachedStyleReferenceImages;
       const isStyleTransfer = options.style_transfer_mode ?? styleReferenceImages.length > 0;
-      const productAttachmentBase64 = attachedImageBase64List.find((_, index) => !styleReferenceIndexes.includes(index)) || null;
+      // A product already confirmed on the canvas remains the authoritative
+      // product. New generic attachments are contextual references for the
+      // Agent to interpret; they must not silently replace the product image.
+      const requestProductImage = attachmentRoles.productImage;
+      const untypedReferenceImages = attachmentRoles.referenceImages;
 
       const bodyObj = {
           message: enhancedText,
+          display_message: text,
           product_name: options.product_name || productInfo.name || '',
           selling_points: options.selling_points || productInfo.sellingPoints || '',
-          product_image_base64: options.product_image_base64 || productAttachmentBase64 || canvasProductImageBase64 || productImage || null,
+          product_image_base64: requestProductImage,
           image_types: options.image_types || (isStyleTransfer ? ['main', 'selling_point', 'detail'] : []),
-          session_id: options.session_id || currentSessionId,
+          session_id: requestSessionId,
           mask_data: inpaintMaskData || null,
           canvas_snapshot: infiniteCanvasRef.current?.getCanvasSnapshot?.() || null,
           stitch_regions: stitchRegions,
           current_images: canvasImageMap,
-          reference_images: attachedImageBase64List.length > 0 ? attachedImageBase64List : (canvasProductImageBase64 ? [canvasProductImageBase64] : []),
+          reference_images: untypedReferenceImages,
           style_reference_images: styleReferenceImages,
           style_transfer_mode: isStyleTransfer,
           product_set_mode: options.product_set_mode || false,
@@ -1993,6 +2157,13 @@ function AppInner() {
             ...(options.agent_memory || {}),
             ...(productImageAnalysis ? { _product_analysis: productImageAnalysis } : {}),
           },
+          message_images: attachmentsForTurn.map(image => ({
+            id: image.id,
+            name: image.name || '图片',
+            url: image.url,
+            role: image.role,
+            kind: image.kind,
+          })),
         };
         const sseResponse = await fetch('/api/agent/chat-stream', {
         method: 'POST',
@@ -2002,11 +2173,6 @@ function AppInner() {
         credentials: 'include',
         body: JSON.stringify(bodyObj)
       });
-
-      // 清空附件列表
-      if (attachedImages.length > 0) {
-        setAttachedImages([]);
-      }
 
       if (!sseResponse.ok) {
         const errText = await sseResponse.text();
@@ -2154,7 +2320,7 @@ function AppInner() {
                   setTimeout(() => {
                     const els = infiniteCanvasRef.current?.getElements?.() || [];
                     const cam = infiniteCanvasRef.current?.getCamera?.() || { x: 400, y: 300, zoom: 1.0 };
-                    saveCanvasState(currentSessionId, { elements: els, camera: cam });
+                    saveCanvasState(requestSessionId, { elements: els, camera: cam });
                   }, 2000);
                 }
                 if (event.remainingCredits != null) {
@@ -2184,14 +2350,16 @@ function AppInner() {
                 break;
 
               case 'agent_thinking':
-                // New ReAct Agent: show thinking status
-                if (event.text) {
-                  setChatMessages(prev => [...prev, {
-                    sender: 'ai',
-                    agent: 'react_agent',
-                    text: `🤔 ${event.text.slice(0, 200)}`
-                  }]);
-                }
+                setTypingStatus({
+                  sense: '正在理解你的确认…',
+                  decide: '正在规划下一步…',
+                  act: '正在执行生成任务…',
+                  review: '正在检查生成结果…',
+                }[event.phase] || 'Agent 正在处理…');
+                break;
+
+              case 'reference_received':
+                setTypingStatus(`已确认 ${event.total_count || 0} 张参考图，正在分析风格…`);
                 break;
 
               case 'agent_tool_start':
@@ -2202,16 +2370,25 @@ function AppInner() {
                     'evaluate_image': '正在评估图片质量...',
                     'query_canvas': '正在查询画布状态...',
                     'search_knowledge': '正在搜索知识库...',
+                    'generate_product_set': '正在生成你选择的商品图...',
+                    'style_transfer_batch': '正在分析参考风格并生成图片...',
                     'update_plan': '正在更新设计方案...',
                     'finish_task': '任务完成',
                   };
                   const label = toolLabels[event.tool] || `正在执行: ${event.tool}`;
+                  setTypingStatus(label);
                   setChatMessages(prev => [...prev, {
                     sender: 'ai',
                     agent: 'react_agent',
                     text: `🔧 ${label}`
                   }]);
                 }
+                break;
+
+              case 'action_failed':
+                // Recoverable tool feedback stays inside the Agent loop. The
+                // Agent observes it and repairs the next Action call.
+                console.warn('[Agent Action Repair]', event.action, event.error);
                 break;
 
               case 'flow_decision':
@@ -2246,7 +2423,12 @@ function AppInner() {
                 break;
 
               case 'error':
-                throw new Error(event.message || 'Stream processing error');
+                {
+                  const streamError = new Error(event.message || 'Stream processing error');
+                  streamError.code = event.code;
+                  streamError.retryable = Boolean(event.retryable);
+                  throw streamError;
+                }
 
               case 'done':
                 // Stream complete
@@ -2287,7 +2469,7 @@ function AppInner() {
                     },
                     credentials: 'include',
                     body: JSON.stringify({
-                      session_id: currentSessionId,
+                      session_id: requestSessionId,
                       tool_name: toolName,
                       result: toolResult
                     })
@@ -2296,10 +2478,22 @@ function AppInner() {
                 break;
                 }
               } catch (parseErr) {
-                if (parseErr.message && parseErr.message.includes('Stream')) throw parseErr;
+                // Only malformed JSON should be ignored. Agent error events
+                // are real application failures and must reach the outer
+                // handler so the user sees a retryable error instead of an
+                // apparently frozen conversation.
+                if (!(parseErr instanceof SyntaxError)) throw parseErr;
               }
             }
           }
+
+      // Only clear attachments after the full Agent stream succeeds. An HTTP
+      // 200 merely means SSE started; downstream validation/generation can
+      // still fail and the user must be able to retry with the same images.
+      if (attachmentsForTurn.length > 0) {
+        const sentIds = new Set(attachmentsForTurn.map(image => image.id));
+        updateAttachedImages(current => current.filter(image => !sentIds.has(image.id)));
+      }
 
       // 保存 SSE 流式结果上下文，供后续对话使用
       if (streamingResult.product_name) {
@@ -2351,8 +2545,17 @@ function AppInner() {
         });
       }
     } catch (err) {
+      const failureText = err.message || 'Agent 暂时无法完成本次生成，请稍后重试。';
+      setChatMessages(prev => [...prev, {
+        sender: 'ai',
+        agent: 'coordinator',
+        text: `生成未完成：${failureText}`,
+        isError: true,
+      }]);
       if (err.code === 'AGENT_REQUEST_IN_PROGRESS' || err.status === 409) {
         showError('Agent 正在处理上一条请求，请等待当前生成完成后再发送。');
+      } else if (err.retryable || ['AGENT_SERVICE_UNAVAILABLE', 'AGENT_STREAM_INTERRUPTED', 'AGENT_STREAM_FAILED'].includes(err.code)) {
+        showError(err.message || 'Agent 暂时不可用，当前会话已保留，请重试。');
       } else if (err.code === 'AGENT_RATE_LIMITED' || err.status === 429 || /请求过于频繁|rate limit|too many/i.test(err.message || '')) {
         showError('Agent 请求太密集，系统已启用保护。请等待当前任务完成后再试。');
       } else {
@@ -2362,6 +2565,7 @@ function AppInner() {
       agentRequestInFlightRef.current = false;
       setIsGenerating(false);
       setIsTyping(false);
+      setTypingStatus('正在理解需求…');
     }
   };
 
@@ -2393,8 +2597,10 @@ function AppInner() {
 
   // Open a session from the sessions list — load chat + canvas state, then jump to workspace
   const handleOpenSession = async (sessionId) => {
-    await selectSession(sessionId);
-    setView('workspace');
+    const selectedSession = await selectSession(sessionId);
+    if (selectedSession) {
+      setView('workspace');
+    }
   };
 
   // Create a new session and jump to workspace
@@ -2569,14 +2775,16 @@ function AppInner() {
       sizeStr = `${bytes} B`;
     }
 
-    const tempId = 'temp-' + Date.now();
+    const clientUploadId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const tempId = 'temp-' + clientUploadId;
     const newAsset = {
       id: tempId,
       name: fileName || `自定义素材_${Math.floor(Math.random() * 100)}.png`,
       type: type,
       size: sizeStr,
       date: new Date().toISOString().split('T')[0],
-      url: base64Url
+      url: base64Url,
+      sync_status: currentUser ? 'syncing' : 'local_only',
     };
     setUploadedAssets(prev => [newAsset, ...prev]);
 
@@ -2595,7 +2803,7 @@ function AppInner() {
           }
         }
 
-        const response = await fetch('/api/assets/upload', {
+        const { response, data } = await fetchJsonWithRetry('/api/assets/upload', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -2604,19 +2812,27 @@ function AppInner() {
             uid: currentUser.uid,
             name: fileName || `upload_${Date.now()}.png`,
             data: base64Url,
+            client_upload_id: clientUploadId,
             session_id: activeSessionId || null,
-            metrics: { asset_role: type === 'style_reference' ? 'style_reference' : 'product' }
+            metrics: {
+              asset_role: type === 'style_reference'
+                ? 'style_reference'
+                : type === 'chat_attachment'
+                  ? 'chat_attachment'
+                  : 'product'
+            }
           }),
           credentials: 'include'
-        });
-        const data = await response.json();
+        }, { attempts: 3, timeoutMs: 45000 });
         if (response.ok && data.success) {
-          setUploadedAssets(prev => prev.map(a => a.id === tempId ? data.asset : a));
-          return data.asset;
+          const syncedAsset = { ...data.asset, sync_status: 'synced' };
+          setUploadedAssets(prev => prev.map(a => a.id === tempId ? syncedAsset : a));
+          return syncedAsset;
         }
         throw new Error(data.error || data.detail || `同步请求失败（${response.status}）`);
       } catch (err) {
-        showError(`素材云端同步失败: ${err.message}`);
+        setUploadedAssets(prev => prev.map(a => a.id === tempId ? { ...a, sync_status: 'failed' } : a));
+        showError(`素材云端同步暂时失败，本地素材仍可使用：${err.message}`);
       }
     }
     return newAsset;
@@ -2631,10 +2847,11 @@ function AppInner() {
   };
 
   const handleConfirmExport = async () => {
-    setShowExportModal(false);
     try {
       if (infiniteCanvasRef.current) {
-        infiniteCanvasRef.current.exportCanvas(exportFormat, exportScale);
+        const exportedCount = await infiniteCanvasRef.current.exportCanvas(exportFormat, exportScale);
+        setShowExportModal(false);
+        showSuccess(`已导出 ${exportedCount} 张图片`);
       } else {
         showError('画布未就绪，无法导出。');
       }
@@ -3254,6 +3471,7 @@ function AppInner() {
                   processCutout={generateChromaKeyCutout}
                   chatMessages={chatMessages}
                   isTyping={isTyping}
+                  typingStatus={typingStatus}
                   onSendMessage={handleSendMessage}
                   chatInputValue={chatInputValue}
                   onInputValueChange={setChatInputValue}
@@ -3395,22 +3613,23 @@ function AppInner() {
               <div>
                 <label className="settings-label">版面尺寸规格</label>
                 <select className="settings-select" id="detail-aspect">
-                  <option value="3:4">3:4 A+/详情页纵向版 (1440 x 1920)</option>
+                  <option value="3:4">3:4 A+/详情页纵向版 (1728 x 2304)</option>
                 </select>
               </div>
             </div>
             <div className="settings-actions" style={{ marginTop: '20px' }}>
               <button className="settings-btn cancel" onClick={() => setShowDetailGeneratorModal(false)}>取消</button>
               <button 
-                className="settings-btn save" 
+                className="settings-btn save"
+                disabled={quickToolStarting === 'detail'}
                 onClick={() => {
-                  const points = document.getElementById('detail-points')?.value || '详情页';
+                  const points = document.getElementById('detail-points')?.value || '';
                   const styleVal = document.getElementById('detail-style')?.value || 'french_vintage';
                   const aspectVal = document.getElementById('detail-aspect')?.value || '3:4';
                   handleGenerateDetailPage(detailUploadBase64, points, styleVal, aspectVal);
                 }}
               >
-                立即智能排版生成
+                {quickToolStarting === 'detail' ? '正在启动生成…' : '立即智能排版生成'}
               </button>
             </div>
           </div>
