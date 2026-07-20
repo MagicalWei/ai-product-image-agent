@@ -46,7 +46,7 @@ SELECT
     1 - (embedding <=> $1) AS score
 FROM rag_documents
 WHERE embedding IS NOT NULL
-    AND ($6::varchar IS NULL OR category = $6)
+    AND ($4::varchar IS NULL OR category = $4)
 ORDER BY embedding <=> $1
 LIMIT $2
 OFFSET $3

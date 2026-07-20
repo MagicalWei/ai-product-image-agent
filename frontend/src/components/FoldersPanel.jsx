@@ -1,6 +1,6 @@
 // src/components/FoldersPanel.jsx
 import React, { useState, useEffect, useCallback } from 'react';
-import { Folder, FolderOpen, FileImage, Plus, Trash2, Upload, FileCode, Search, ImagePlus, AlertTriangle, RefreshCw } from 'lucide-react';
+import { Folder, FolderOpen, FileImage, Plus, Trash2, Upload, FileCode, Search, ImagePlus, AlertTriangle, RefreshCw, Video } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { resolveAssetUrl } from '../lib/utils';
 import { fetchJsonWithRetry } from '../lib/reliableFetch';
@@ -176,7 +176,7 @@ export default function FoldersPanel({ versions, setVersions, onSelectAsset }) {
         </h3>
         {[
           { id: 'all', name: '全部资产', count: allItems.length },
-          { id: 'ai_generated', name: 'AI生成图', count: aiGeneratedItems.length },
+          { id: 'ai_generated', name: 'AI生成内容', count: aiGeneratedItems.length },
           { id: 'user_uploaded', name: '商拍原图/上传', count: userUploadedItems.length },
         ].map(cat => (
           <button
@@ -290,7 +290,9 @@ export default function FoldersPanel({ versions, setVersions, onSelectAsset }) {
                 <span>{loadError ? '素材暂未加载成功，文件没有被删除' : '本分类下暂无文件'}</span>
               </div>
             ) : (
-              filteredItems.map(item => (
+              filteredItems.map(item => {
+                const isVideo = item.metrics?.asset_role === 'video' || /\.(mp4|webm|mov)$/i.test(item.url || item.name || '');
+                return (
                 <div
                   key={item.id}
                   className="glass-pane glass-pane-interactive"
@@ -308,7 +310,15 @@ export default function FoldersPanel({ versions, setVersions, onSelectAsset }) {
                 >
                   {/* Thumb preview */}
                   <div style={{ height: '110px', background: '#eef0fc', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', borderBottom: '1px solid var(--border-light)' }}>
-                    {item.url && !brokenAssets.has(item.id) ? (
+                    {item.url && !brokenAssets.has(item.id) ? isVideo ? (
+                      <video
+                        src={resolveAssetUrl(item.url)}
+                        muted
+                        preload="metadata"
+                        style={{ width: '100%', height: '100%', objectFit: 'cover', background: '#111' }}
+                        onError={() => setBrokenAssets(prev => new Set([...prev, item.id]))}
+                      />
+                    ) : (
                       <img
                         src={resolveAssetUrl(item.url)}
                         style={{ width: '100%', height: '100%', objectFit: 'cover' }}
@@ -412,9 +422,11 @@ export default function FoldersPanel({ versions, setVersions, onSelectAsset }) {
 
                     {/* Send to Canvas Button */}
                     <button
-                      onClick={() => onSelectAsset?.(item)}
+                      onClick={() => isVideo
+                        ? window.open(resolveAssetUrl(item.url), '_blank', 'noopener,noreferrer')
+                        : onSelectAsset?.(item)}
                       className="send-to-canvas-btn"
-                      title="发送到画布"
+                      title={isVideo ? '预览并下载视频' : '发送到画布'}
                       style={{
                         marginTop: '6px',
                         width: '100%',
@@ -433,7 +445,7 @@ export default function FoldersPanel({ versions, setVersions, onSelectAsset }) {
                         transition: 'all 0.15s ease'
                       }}
                     >
-                      <ImagePlus size={13} /> 添加到画布
+                      {isVideo ? <><Video size={13} /> 预览视频</> : <><ImagePlus size={13} /> 添加到画布</>}
                     </button>
                   </div>
 
@@ -460,7 +472,8 @@ export default function FoldersPanel({ versions, setVersions, onSelectAsset }) {
                     <Trash2 size={12} />
                   </button>
                 </div>
-              ))
+                );
+              })
             )}
           </div>
         )}

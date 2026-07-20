@@ -1,10 +1,13 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { Cpu, Check, ArrowRight, AlertCircle } from 'lucide-react';
 import CloseButton from './CloseButton';
+import { AnimatePresence, motion } from 'motion/react';
 
 export default function PaymentModal({ onClose, onPaymentSuccess, currentUser }) {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [isVisible, setIsVisible] = useState(true);
+  const requestClose = () => setIsVisible(false);
 
   const plans = [
     {
@@ -100,10 +103,15 @@ export default function PaymentModal({ onClose, onPaymentSuccess, currentUser })
   };
 
   return (
-    <div className="onboarding-modal-overlay" onClick={onClose}>
-      <div
+    <AnimatePresence onExitComplete={onClose}>
+    {isVisible && <motion.div className="onboarding-modal-overlay" onClick={requestClose} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.16 }}>
+      <motion.div
         className="onboarding-modal-content glass-panel"
         onClick={(e) => e.stopPropagation()}
+        initial={{ opacity: 0, y: 8, scale: 0.985 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 5, scale: 0.99 }}
+        transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
         style={{
           maxWidth: '820px',
           padding: '24px',
@@ -111,7 +119,7 @@ export default function PaymentModal({ onClose, onPaymentSuccess, currentUser })
           transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)'
         }}
       >
-        <CloseButton onClick={onClose} />
+        <CloseButton onClick={requestClose} />
 
         {/* Header */}
         <div style={{ textAlign: 'center', marginBottom: '16px' }}>
@@ -213,7 +221,8 @@ export default function PaymentModal({ onClose, onPaymentSuccess, currentUser })
             <span>{errorMsg}</span>
           </div>
         )}
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>}
+    </AnimatePresence>
   );
 }

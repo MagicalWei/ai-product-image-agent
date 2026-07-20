@@ -7,6 +7,7 @@ const CloseButton = forwardRef(function CloseButton({ onClick, style }, ref) {
     <motion.button
       ref={ref}
       type="button"
+      aria-label="关闭"
       onClick={onClick}
       style={{
         position: 'absolute',

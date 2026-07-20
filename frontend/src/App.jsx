@@ -1,6 +1,6 @@
 // src/App.jsx
 import React, { useState, useEffect, useRef, Suspense } from 'react';
-import { Sparkles, Bell, HelpCircle, ArrowRight, Settings, AlertCircle, CheckCircle, Menu, Home, Grid, Layers, History, FolderOpen, Database, Sun, Moon, MessageSquare, Box, Tag, Type, Image as ImageIcon, X, Minus, Plus, ChevronDown, ChevronUp, Play, Download, Share2, Loader2, BookOpen, Video, ShoppingBag, User, Users, Wand2, Zap, Crown } from 'lucide-react';
+import { Bell, HelpCircle, ArrowRight, Settings, AlertCircle, CheckCircle, Menu, Home, Grid, Layers, History, FolderOpen, Database, Sun, Moon, MessageSquare, Box, Tag, Type, Image as ImageIcon, X, Minus, Plus, ChevronDown, ChevronUp, Play, Download, Share2, Loader2, BookOpen, Video, ShoppingBag, User, Users, Zap, Crown } from 'lucide-react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 
 // Eagerly imported shell component.
@@ -28,6 +28,7 @@ const AuthModal = React.lazy(() => import('./components/AuthModal'));
 const PaymentModal = React.lazy(() => import('./components/PaymentModal'));
 const ModeSelectModal = React.lazy(() => import('./components/ModeSelectModal'));
 const OssHero = React.lazy(() => import('./components/OssHero'));
+const VideoWorkbench = React.lazy(() => import('./components/VideoWorkbench'));
 
 // Context providers
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -212,6 +213,7 @@ function AppInner() {
     fetchSessions,
     saveCanvasState,
     currentCanvasState,
+    setCurrentCanvasState,
   } = app;
 
   // ---- Export hook ----
@@ -352,7 +354,6 @@ function AppInner() {
   const [showSetGeneratorModal, setShowSetGeneratorModal] = useState(false);
   const [setUploadBase64, setSetUploadBase64] = useState('');
   const [selectedSetSizes, setSelectedSetSizes] = useState(['main', 'selling_point', 'detail']);
-  const [chosenSetStyle, setChosenSetStyle] = useState('minimalist_white');
 
   // Copy generator (风格复刻) states
   const [showCopyGeneratorModal, setShowCopyGeneratorModal] = useState(false);
@@ -374,6 +375,9 @@ function AppInner() {
   const [videoPlayerMotion, setVideoPlayerMotion] = useState('');
   const [videoPlayerBg, setVideoPlayerBg] = useState('');
   const [videoPlayerSrcFilename, setVideoPlayerSrcFilename] = useState('');
+  const [videoEditInitialPlan, setVideoEditInitialPlan] = useState(null);
+  const activeVideoSessionIdRef = useRef('');
+  const videoStatePersistTimerRef = useRef(null);
 
   // Global Progress Overlay states (used by Video, Set, Copy, AI Img, Clear tools)
   const [globalProgressOpen, setGlobalProgressOpen] = useState(false);
@@ -745,7 +749,7 @@ function AppInner() {
     setShowOnboarding(true);
   };
 
-  const handleQuickToolClick = (toolId) => {
+  const handleQuickToolClick = async (toolId, launchPayload = null) => {
     if (toolId === 'set') {
       setSetUploadBase64('');
       setShowSetGeneratorModal(true);
@@ -763,11 +767,74 @@ function AppInner() {
       }, 50);
     } else if (toolId === 'detail') {
       setShowDetailGeneratorModal(true);
-    } else if (toolId === 'video_viral') {
-      setVideoUploadBase64('');
-      setShowVideoGeneratorModal(true);
+    } else if (toolId === 'video_edit' || toolId === 'video_viral' || toolId === 'video_replication') {
+      const initialPlan = toolId === 'video_replication'
+        ? { mode: 'viral_structure_replication', strength: 'medium', ...(launchPayload || {}) }
+        : (launchPayload || { mode: 'video_edit' });
+      const isReplication = initialPlan?.mode === 'viral_structure_replication';
+      const workspaceType = isReplication ? 'viral_replication' : 'video_edit';
+      const title = isReplication ? '爆款结构复刻' : '智能剪辑';
+      const persistentInitialPlan = Object.fromEntries(
+        Object.entries(initialPlan || {}).filter(([key]) => key !== 'sourceFiles' && key !== 'workspace_state'),
+      );
+      const sessionId = await createSession(title, undefined, {
+        workspaceType,
+        lastParams: {
+          workspace_type: workspaceType,
+          video_workspace: {
+            mode: isReplication ? 'viral_structure_replication' : 'video_edit',
+            instruction: initialPlan?.instruction || '',
+            plan: persistentInitialPlan,
+          },
+        },
+      });
+      if (!sessionId) return;
+      activeVideoSessionIdRef.current = sessionId;
+      activeSessionIdRef.current = sessionId;
+      setCurrentSessionId(sessionId);
+      setVideoEditInitialPlan(initialPlan);
+      setView('video-workbench');
+      void fetchSessions();
     }
   };
+
+  const persistVideoWorkspaceState = (workspaceState) => {
+    const sessionId = activeVideoSessionIdRef.current || currentSessionId;
+    if (!sessionId || !workspaceState) return;
+    if (videoStatePersistTimerRef.current) window.clearTimeout(videoStatePersistTimerRef.current);
+    videoStatePersistTimerRef.current = window.setTimeout(async () => {
+      const isReplication = workspaceState.mode === 'viral_structure_replication';
+      try {
+        const response = await fetch(`/api/agent/sessions/${sessionId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({
+            current_state: workspaceState.job?.status === 'completed'
+              ? 'DONE'
+              : workspaceState.job && !['failed', 'completed'].includes(workspaceState.job.status)
+                ? 'VIDEO_RENDERING'
+                : 'VIDEO_EDITING',
+            last_params: {
+              workspace_type: isReplication ? 'viral_replication' : 'video_edit',
+              video_workspace: workspaceState,
+            },
+          }),
+        });
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.error || '视频工作台记录保存失败');
+        }
+        void fetchSessions();
+      } catch (error) {
+        console.warn('[Video Workspace] Persist failed:', error.message);
+      }
+    }, 450);
+  };
+
+  useEffect(() => () => {
+    if (videoStatePersistTimerRef.current) window.clearTimeout(videoStatePersistTimerRef.current);
+  }, []);
 
   const handleQuickToolFileChange = async (e) => {
     const file = e.target.files[0];
@@ -786,6 +853,9 @@ function AppInner() {
       showSuccess('AI 智能抠图启动中...');
       try {
         const cutoutBase64 = await generateChromaKeyCutout(base64Url);
+        const cutoutSessionId = await ensureActiveSession('智能抠图');
+        const storedCutout = await addUploadedAsset(`智能抠图_${file.name.replace(/\.[^.]+$/, '')}.png`, cutoutBase64, 'cutout');
+        const durableCutoutUrl = storedCutout?.url || cutoutBase64;
         
         const img = new Image();
         img.onload = () => {
@@ -799,17 +869,24 @@ function AppInner() {
             y: -h / 2,
             width: w,
             height: h,
-            url: cutoutBase64,
-            name: `智能抠图_${file.name}`
+            url: durableCutoutUrl,
+            name: `智能抠图_${file.name}`,
+            source: 'toolbox_cutout',
           };
-
-          localStorage.setItem('infinite_canvas_elements', JSON.stringify([newImageElement]));
-          
-          const defaultCamera = { x: 400, y: 300, zoom: 1.0 };
-          localStorage.setItem('infinite_canvas_camera', JSON.stringify(defaultCamera));
+          let existingElements = [];
+          let camera = { x: 400, y: 300, zoom: 1.0 };
+          try {
+            const parsed = JSON.parse(localStorage.getItem('infinite_canvas_elements') || '[]');
+            if (Array.isArray(parsed)) existingElements = parsed;
+            camera = JSON.parse(localStorage.getItem('infinite_canvas_camera') || JSON.stringify(camera));
+          } catch { /* use safe defaults */ }
+          const nextElements = [...existingElements, newImageElement];
+          localStorage.setItem('infinite_canvas_elements', JSON.stringify(nextElements));
+          localStorage.setItem('infinite_canvas_camera', JSON.stringify(camera));
+          if (cutoutSessionId) void saveCanvasState(cutoutSessionId, { elements: nextElements, camera });
           
           setView('workspace');
-          showSuccess('抠图提取成功，已导入画布中心！');
+          showSuccess('抠图完成，已加入当前画布，仓库同步状态可在素材库查看');
         };
         img.src = cutoutBase64;
       } catch (err) {
@@ -975,21 +1052,21 @@ function AppInner() {
     return { sessionId, styleReferenceAsset };
   };
 
-  const handleGenerateSet = async (productImg, chosenStyleId, selectedTypes) => {
+  const handleGenerateSet = async (productImg, selectedTypes) => {
     if (!productImg) return showError('请先上传商品图');
     if (!selectedTypes.length) return showError('请至少选择一种套图类型');
     try {
       const { sessionId } = await prepareQuickToolSession({ title: '商品套图', productImg });
       setShowSetGeneratorModal(false);
       await handleSendMessage(
-        `基于上传的商品图生成商品套图，视觉风格为 ${chosenStyleId}。`,
+        '基于上传的商品图生成商品套图。请根据商品品类、原图配色、材质观感和图片中可见卖点，自动制定适合电商转化的统一视觉方案。',
         null,
         {
           session_id: sessionId,
           product_image_base64: productImg,
           image_types: selectedTypes,
           product_set_mode: true,
-          style_preference: chosenStyleId,
+          style_preference: '根据商品图可见证据自动确定，并保持整套图片配色、光线和版式语言一致',
           message_images: [{ url: productImg, name: '商品图' }],
           reset_conversation: true,
         },
@@ -1040,7 +1117,7 @@ function AppInner() {
     setView('workspace');
   };
 
-  const handleGenerateDetailPage = async (productImg, points, styleVal, aspectVal) => {
+  const handleGenerateDetailPage = async (productImg, points) => {
     if (!productImg) return showError('请先上传商品图');
     if (!points.trim()) return showError('请填写商品品类或卖点');
     if (quickToolStarting) return;
@@ -1058,8 +1135,8 @@ function AppInner() {
           image_types: ['detail'],
           product_set_mode: true,
           selling_points: points,
-          style_preference: styleVal,
-          aspect_ratio: aspectVal,
+          style_preference: '根据商品品类、商品原图和卖点自动确定适合电商阅读与转化的排版方案',
+          aspect_ratio: '3:4',
           message_images: [{ url: productImg, name: '商品图' }],
           reset_conversation: true,
         },
@@ -1567,58 +1644,68 @@ function AppInner() {
     }
   };
 
-  const handleDirectAgentStart = async (prompt, attachedImage) => {
-    // Auto-create session for Portal workflow if none exists
-    if (!currentSessionId) {
-      const newId = await createSession('新设计会话');
-      if (newId) setCurrentSessionId(newId);
-    }
+  const handleDirectAgentStart = async (prompt, attachedImage, launchPayload = {}) => {
+    const productImages = launchPayload.productImages?.length
+      ? launchPayload.productImages
+      : (attachedImage ? [attachedImage] : []);
+    const guessedName = prompt.length > 25 ? `${prompt.substring(0, 25)}...` : (prompt || '商品设计');
+    const sessionId = await createSession(guessedName);
+    if (!sessionId) return;
+    activeSessionIdRef.current = sessionId;
 
-    let chosenStyleId = 'minimalist_white';
-    if (prompt.includes('沙滩') || prompt.includes('阳光') || prompt.includes('海边')) {
-      chosenStyleId = 'outdoor_sunlight';
-    } else if (prompt.includes('都市') || prompt.includes('极简') || prompt.includes('白底')) {
-      chosenStyleId = 'urban_minimalist';
-    }
-
-    const guessedName = prompt.length > 25 ? prompt.substring(0, 25) + '...' : (prompt || '商品设计');
-    let imageToUse = '';
-    let uploadType = 'custom';
-
-    if (attachedImage) {
-      setIsGenerating(true);
-      const asset = await addUploadedAsset(attachedImage.name, attachedImage.base64, 'raw');
-      imageToUse = asset.url;
-      uploadType = 'custom';
-      setIsGenerating(false);
-    }
-
-    const initialProductInfo = {
-      name: guessedName,
-      sellingPoints: prompt.split('，')[1] || prompt.split(',')[1] || '',
-      styleId: chosenStyleId,
-      uploadType: uploadType,
-      productImage: imageToUse
-    };
-
-    setProductInfo(initialProductInfo);
     setVersions([]);
     setCurrentVersionIndex(-1);
     setView('workspace');
 
-    if (attachedImage) {
-      startAiDesign(initialProductInfo, 'cowork');
-    } else {
-      setChatMessages([
-        {
-          sender: 'ai',
-          text: `👋 您好！已收到您的设计创意意图：
-"${prompt}"
-
-为了帮您生成高品质的场景融合图，**请在输入框旁点击上传按钮上传您的商品实拍照片**！`
-        }
-      ]);
+    const persistedProducts = [];
+    for (const image of productImages) {
+      const asset = await addUploadedAsset(image.name, image.base64, 'raw');
+      persistedProducts.push({ ...image, url: asset?.url || image.base64, role: 'product', upload_status: asset?.sync_status === 'synced' ? 'ready' : 'local_only' });
     }
+
+    let persistedStyle = null;
+    if (launchPayload.styleReference) {
+      const reference = launchPayload.styleReference;
+      const asset = await addUploadedAsset(reference.name, reference.base64, 'style_reference');
+      persistedStyle = { ...reference, url: asset?.url || reference.base64, role: 'style_reference', upload_status: asset?.sync_status === 'synced' ? 'ready' : 'local_only' };
+    }
+
+    const attachments = [
+      ...persistedProducts.map(image => ({ id: image.id, name: image.name, url: image.url, role: 'product', upload_status: image.upload_status })),
+      ...(persistedStyle ? [{ id: persistedStyle.id, name: persistedStyle.name, url: persistedStyle.url, role: 'style_reference', upload_status: persistedStyle.upload_status }] : []),
+    ];
+    replaceAttachedImages(attachments);
+
+    if (persistedProducts.length > 0) {
+      const elements = persistedProducts.map((image, index) => ({
+        id: `portal-product-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${index}`}`,
+        type: 'image',
+        x: index * 230 - ((persistedProducts.length - 1) * 115),
+        y: -150,
+        width: 210,
+        height: 300,
+        url: image.url,
+        name: image.name,
+        source: 'portal_upload',
+      }));
+      const canvasState = { _session_id: sessionId, elements, camera: { x: 400, y: 300, zoom: 1 } };
+      setCurrentCanvasState(canvasState);
+      localStorage.setItem('infinite_canvas_elements', JSON.stringify(elements));
+      localStorage.setItem('infinite_canvas_camera', JSON.stringify(canvasState.camera));
+      void saveCanvasState(sessionId, canvasState);
+      setProductImage(persistedProducts[0].url);
+      setCanvasProductImageBase64(persistedProducts[0].base64);
+    }
+
+    setProductInfo({ name: guessedName, sellingPoints: '', styleId: '' });
+    await handleSendMessage(prompt, null, {
+      session_id: sessionId,
+      attachments,
+      product_image_base64: persistedProducts[0]?.base64 || null,
+      style_reference_images: persistedStyle ? [persistedStyle.base64] : [],
+      style_transfer_mode: Boolean(persistedStyle),
+      reset_conversation: true,
+    });
   };
 
   const handleSelectAsset = async (asset) => {
@@ -2349,6 +2436,18 @@ function AppInner() {
                 // Internal events — no chat message
                 break;
 
+              case 'video_edit_plan':
+                setVideoEditInitialPlan(event.plan || null);
+                setView('video-workbench');
+                setTypingStatus('剪辑方案已准备好，请选择视频素材');
+                break;
+
+              case 'viral_replication_plan':
+                setVideoEditInitialPlan(event.plan || { mode: 'viral_structure_replication' });
+                setView('video-workbench');
+                setTypingStatus('爆款结构复刻方案已准备好，请上传参考视频和商品素材');
+                break;
+
               case 'agent_thinking':
                 setTypingStatus({
                   sense: '正在理解你的确认…',
@@ -2372,6 +2471,7 @@ function AppInner() {
                     'search_knowledge': '正在搜索知识库...',
                     'generate_product_set': '正在生成你选择的商品图...',
                     'style_transfer_batch': '正在分析参考风格并生成图片...',
+                    'plan_video_edit': '正在规划视频剪辑方案...',
                     'update_plan': '正在更新设计方案...',
                     'finish_task': '任务完成',
                   };
@@ -2599,7 +2699,24 @@ function AppInner() {
   const handleOpenSession = async (sessionId) => {
     const selectedSession = await selectSession(sessionId);
     if (selectedSession) {
-      setView('workspace');
+      const lastParams = selectedSession.last_params && typeof selectedSession.last_params === 'object'
+        ? selectedSession.last_params
+        : {};
+      const workspaceType = lastParams.workspace_type || 'image_design';
+      if (workspaceType === 'video_edit' || workspaceType === 'viral_replication') {
+        const workspaceState = lastParams.video_workspace || {};
+        activeVideoSessionIdRef.current = sessionId;
+        activeSessionIdRef.current = sessionId;
+        setVideoEditInitialPlan({
+          ...(workspaceState.plan || {}),
+          mode: workspaceType === 'viral_replication' ? 'viral_structure_replication' : 'video_edit',
+          workspace_state: workspaceState,
+        });
+        setView('video-workbench');
+      } else {
+        activeVideoSessionIdRef.current = '';
+        setView('workspace');
+      }
     }
   };
 
@@ -2889,6 +3006,8 @@ function AppInner() {
         onViewChange={(newView) => {
           if (newView === 'workspace' && versions.length === 0) {
             setShowOnboarding(true);
+          } else if (newView === 'video-workbench') {
+            void handleQuickToolClick('video_edit');
           } else {
             setView(newView);
           }
@@ -2914,7 +3033,7 @@ function AppInner() {
               </button>
             )}
             <h1 className="brand-text" style={{ fontSize: '1.05rem', fontWeight: 600, color: 'var(--on-surface)' }}>
-              {view === 'workspace' ? "协同编辑工作台" : "AI商品工作台"}
+              {view === 'workspace' ? '协同编辑工作台' : view === 'video-workbench' ? '智能剪辑工作台' : 'AI商品工作台'}
             </h1>
           </div>
 
@@ -3434,8 +3553,24 @@ function AppInner() {
             } />
             <Route path="/tools" element={
               <div style={{ padding: '0 24px' }}>
-                <ToolsPanel currentVersion={currentVersion} />
+                <ToolsPanel
+                  currentVersion={currentVersion}
+                  sessionId={currentSessionId}
+                  onLaunchTool={handleQuickToolClick}
+                  onSaveAsset={addUploadedAsset}
+                  onError={showError}
+                  onSuccess={showSuccess}
+                />
               </div>
+            } />
+            <Route path="/video-workbench" element={
+              <VideoWorkbench
+                sessionId={currentSessionId}
+                initialPlan={videoEditInitialPlan}
+                onStateChange={persistVideoWorkspaceState}
+                onError={showError}
+                onSuccess={showSuccess}
+              />
             } />
             <Route path="/sessions" element={
               <div style={{ padding: '0 24px' }}>
@@ -3601,21 +3736,6 @@ function AppInner() {
                   defaultValue=""
                 />
               </div>
-              <div>
-                <label className="settings-label">排版设计风格</label>
-                <select className="settings-select" id="detail-style">
-                  <option value="french_vintage">法式浪漫复古</option>
-                  <option value="outdoor_sunlight">户外晨曦自然</option>
-                  <option value="urban_minimalist">都市极简科技</option>
-                  <option value="minimalist_white">极简清冷白底</option>
-                </select>
-              </div>
-              <div>
-                <label className="settings-label">版面尺寸规格</label>
-                <select className="settings-select" id="detail-aspect">
-                  <option value="3:4">3:4 A+/详情页纵向版 (1728 x 2304)</option>
-                </select>
-              </div>
             </div>
             <div className="settings-actions" style={{ marginTop: '20px' }}>
               <button className="settings-btn cancel" onClick={() => setShowDetailGeneratorModal(false)}>取消</button>
@@ -3624,9 +3744,7 @@ function AppInner() {
                 disabled={quickToolStarting === 'detail'}
                 onClick={() => {
                   const points = document.getElementById('detail-points')?.value || '';
-                  const styleVal = document.getElementById('detail-style')?.value || 'french_vintage';
-                  const aspectVal = document.getElementById('detail-aspect')?.value || '3:4';
-                  handleGenerateDetailPage(detailUploadBase64, points, styleVal, aspectVal);
+                  handleGenerateDetailPage(detailUploadBase64, points);
                 }}
               >
                 {quickToolStarting === 'detail' ? '正在启动生成…' : '立即智能排版生成'}
@@ -3636,14 +3754,14 @@ function AppInner() {
         </div>
       )}
 
-      {/* Video Generator Modal */}
-      {showVideoGeneratorModal && (
+      {/* Legacy CSS-only preview kept unreachable during the migration window. */}
+      {false && showVideoGeneratorModal && (
         <div className="settings-modal-overlay" onClick={() => setShowVideoGeneratorModal(false)}>
           <div className="settings-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '480px' }}>
             <div className="settings-modal-header">
               <h3 className="settings-modal-title">
                 <Video size={18} style={{ color: 'var(--primary)' }} />
-                <span>AI 爆款视频生成器 (三维运镜)</span>
+                <span>智能剪辑</span>
               </h3>
               <button className="settings-close-btn" onClick={() => setShowVideoGeneratorModal(false)}>×</button>
             </div>
@@ -3729,7 +3847,7 @@ function AppInner() {
                   handleRenderVideo(img, motion, bg);
                 }}
               >
-                开始合成爆款视频
+                开始智能剪辑
               </button>
             </div>
           </div>
@@ -3763,7 +3881,7 @@ function AppInner() {
             <div className="settings-modal-header">
               <h3 className="settings-modal-title">
                 <ShoppingBag size={18} style={{ color: 'var(--primary)' }} />
-                <span>AI 商品多比例套图生成器</span>
+                <span>AI 商品套图生成器</span>
               </h3>
               <button className="settings-close-btn" onClick={() => setShowSetGeneratorModal(false)}>×</button>
             </div>
@@ -3806,27 +3924,12 @@ function AppInner() {
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px' }}>
                       <ImageIcon size={22} style={{ color: 'var(--outline)', opacity: 0.6 }} />
                       <span style={{ fontSize: '0.75rem', fontWeight: 600 }}>点击上传商品实拍图</span>
-                      <span style={{ fontSize: '0.65rem', color: 'var(--text-secondary)' }}>模型将对该商品进行抠图并批量排版套图</span>
+                      <span style={{ fontSize: '0.65rem', color: 'var(--text-secondary)' }}>Agent 将识别商品特征并生成统一视觉套图</span>
                     </div>
                   )}
                 </div>
               </div>
               
-              <div>
-                <label className="settings-label">选择套图背景模板风格</label>
-                <select 
-                  className="settings-select" 
-                  value={chosenSetStyle}
-                  onChange={(e) => setChosenSetStyle(e.target.value)}
-                  style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid var(--outline-variant)', background: 'var(--surface-container-low)', color: 'var(--on-surface)' }}
-                >
-                  <option value="french_vintage">法式浪漫复古 (优雅逆光)</option>
-                  <option value="outdoor_sunlight">户外晨曦自然 (夏日沙滩)</option>
-                  <option value="urban_minimalist">都市极简科技 (白领商务)</option>
-                  <option value="minimalist_white">极简清冷白底 (多平台通用)</option>
-                </select>
-              </div>
-
               <div>
                 <label className="settings-label" style={{ marginBottom: '6px', display: 'block' }}>选择套图内容 (支持多选)</label>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
@@ -3859,10 +3962,10 @@ function AppInner() {
               <button 
                 className="settings-btn save" 
                 onClick={() => {
-                  handleGenerateSet(setUploadBase64, chosenSetStyle, selectedSetSizes);
+                  handleGenerateSet(setUploadBase64, selectedSetSizes);
                 }}
               >
-                立即生成多尺寸套图
+                立即生成商品套图
               </button>
             </div>
           </div>
@@ -4105,7 +4208,7 @@ function AppInner() {
             <div className="settings-modal-header" style={{ borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
               <h3 className="settings-modal-title" style={{ color: 'white' }}>
                 <Video size={18} style={{ color: '#ff6b35' }} />
-                <span>AI 爆款视频合成预览 (Video Player)</span>
+                <span>智能剪辑成片预览</span>
               </h3>
               <button className="settings-close-btn" style={{ padding: '4px', height: 'auto', width: 'auto', border: 'none', background: 'none', fontSize: '1.5rem', cursor: 'pointer', color: 'white' }} onClick={() => setShowVideoPlayerModal(false)}>&times;</button>
             </div>
@@ -4216,7 +4319,7 @@ function AppInner() {
       </Suspense>
 
       {/* Payment Modal Overlay */}
-      <Suspense fallback={null}>
+      <Suspense fallback={<div className="modal-loading-fallback">正在加载套餐…</div>}>
         {showPaymentModal && (
           <PaymentModal
             onClose={() => setShowPaymentModal(false)}

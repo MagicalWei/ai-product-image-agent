@@ -10,6 +10,7 @@ import { fetchWithRetries, isConnectivityError } from '../utils/reliableFetch.js
 import { createResilientPool } from '../utils/transientErrors.js';
 import { recoverCanvasFromAssets } from '../utils/canvasRecovery.js';
 import { restoreStyleReferenceImages, selectStyleReferenceUrls } from '../utils/styleReferences.js';
+import { indexMediaAsset } from '../utils/mediaIndex.js';
 
 const router = Router();
 const storage = createStorageProvider(process.env.STORAGE_TYPE || 'local');
@@ -19,17 +20,22 @@ const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:8000';
 
 // 启动时检查 AI 服务可达性
 (async () => {
-  try {
-    const resp = await fetch(`${AI_SERVICE_URL}/health`, { signal: AbortSignal.timeout(5000) });
-    if (resp.ok) {
-      console.log(`[Agent] AI service reachable at ${AI_SERVICE_URL}`);
-    } else {
-      console.warn(`[Agent] AI service at ${AI_SERVICE_URL} returned status ${resp.status}`);
+  let lastError = null;
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    try {
+      const resp = await fetch(`${AI_SERVICE_URL}/health`, { signal: AbortSignal.timeout(5000) });
+      if (resp.ok) {
+        console.log(`[Agent] AI service reachable at ${AI_SERVICE_URL}`);
+        return;
+      }
+      lastError = new Error(`HTTP ${resp.status}`);
+    } catch (error) {
+      lastError = error;
     }
-  } catch (e) {
-    console.warn(`[Agent] AI service at ${AI_SERVICE_URL} is not reachable: ${e.message}`);
-    console.warn(`[Agent] Agent chat endpoints will fail until the Python service is started.`);
+    if (attempt < 5) await new Promise(resolve => setTimeout(resolve, 1500));
   }
+  console.warn(`[Agent] AI service at ${AI_SERVICE_URL} is not reachable: ${lastError?.message || 'unknown error'}`);
+  console.warn('[Agent] Agent chat endpoints will fail until the Python service is started.');
 })();
 // 请求超时 60 秒
 const AI_TIMEOUT_MS = 120_000;
@@ -42,6 +48,7 @@ const AGENT_TOOL_STATUS_LABELS = {
   search_knowledge: '正在搜索知识库...',
   generate_product_set: '正在生成你选择的商品图...',
   style_transfer_batch: '正在分析参考风格并生成图片...',
+  plan_video_edit: '正在规划视频剪辑方案...',
   update_plan: '正在更新设计方案...',
   finish_task: '任务完成',
 };
@@ -133,6 +140,16 @@ function normalizeConfirmedProductAnalysis(input) {
       issues: (Array.isArray(input?.image_quality?.issues) ? input.image_quality.issues : [])
         .map((item) => String(item).trim().slice(0, 200)).filter(Boolean).slice(0, 6),
     },
+    visual_style: {
+      style_summary: String(input?.visual_style?.style_summary || '').trim().slice(0, 240),
+      background: String(input?.visual_style?.background || '').trim().slice(0, 160),
+      lighting: String(input?.visual_style?.lighting || '').trim().slice(0, 160),
+      composition: String(input?.visual_style?.composition || '').trim().slice(0, 160),
+      color_palette: (Array.isArray(input?.visual_style?.color_palette) ? input.visual_style.color_palette : [])
+        .map((item) => String(item).trim().slice(0, 48)).filter(Boolean).slice(0, 8),
+      typography: String(input?.visual_style?.typography || '').trim().slice(0, 160),
+      mood: String(input?.visual_style?.mood || '').trim().slice(0, 160),
+    },
   };
 }
 
@@ -140,7 +157,7 @@ async function loadStoredProductImage(uid, sessionId, previousParams) {
   let imageUrl = previousParams?.product_image_url || '';
   if (!imageUrl) {
     const assetResult = await pool.query(
-      `SELECT url FROM assets
+      `SELECT id, url FROM assets
        WHERE uid = $1 AND session_id = $2 AND source = 'user_uploaded'
          AND COALESCE(metrics->>'asset_role', 'product') NOT IN ('style_reference', 'chat_attachment')
        ORDER BY created_at DESC LIMIT 1`,
@@ -199,19 +216,46 @@ router.get(
   '/sessions',
   authenticateSession,
   asyncHandler(async (req, res) => {
+    const query = String(req.query.q || '').trim().slice(0, 120);
+    const terms = query.split(/\s+/).filter(Boolean).slice(0, 6);
+    const params = [req.user.uid];
+    const searchClauses = terms.map((term) => {
+      params.push(`%${term.replace(/[\\%_]/g, '\\$&')}%`);
+      const index = params.length;
+      return `(s.title ILIKE $${index} ESCAPE '\\'
+        OR COALESCE(s.last_params->>'product_name', '') ILIKE $${index} ESCAPE '\\'
+        OR COALESCE(s.agent_memory->>'product_name', '') ILIKE $${index} ESCAPE '\\'
+        OR COALESCE(s.chat_history::text, '') ILIKE $${index} ESCAPE '\\')`;
+    });
+    const searchSql = searchClauses.length ? ` AND ${searchClauses.join(' AND ')}` : '';
     const result = await pool.query(
       `SELECT s.session_id, s.title, s.current_state, s.updated_at,
+              COALESCE(s.last_params->>'workspace_type', CASE
+                WHEN EXISTS (
+                  SELECT 1 FROM video_jobs v
+                  WHERE v.session_id = s.session_id
+                    AND (s.title ILIKE '%爆款%' OR jsonb_array_length(COALESCE(v.plan->'timed_texts', '[]'::jsonb)) > 0)
+                ) THEN 'viral_replication'
+                WHEN EXISTS (SELECT 1 FROM video_jobs v WHERE v.session_id = s.session_id) THEN 'video_edit'
+                ELSE 'image_design'
+              END) AS workspace_type,
+              COALESCE(s.last_params->>'product_name', s.agent_memory->>'product_name', '') AS product_name,
               jsonb_array_length(s.chat_history) AS message_count,
               (SELECT COUNT(DISTINCT a.url)::int FROM assets a
                WHERE a.session_id = s.session_id
+                 AND COALESCE(a.media_type, 'image') <> 'video'
                  AND (a.source = 'ai_generated'
-                      OR COALESCE(a.metrics->>'asset_role', 'product') NOT IN ('style_reference', 'chat_attachment'))) AS image_count
+                      OR COALESCE(a.metrics->>'asset_role', 'product') NOT IN ('style_reference', 'chat_attachment'))) AS image_count,
+              (SELECT COUNT(DISTINCT a.url)::int FROM assets a
+               WHERE a.session_id = s.session_id
+                 AND a.media_type = 'video') AS video_count
        FROM doubao_agent_sessions s
        WHERE s.uid = $1
+       ${searchSql}
        ORDER BY s.updated_at DESC`,
-      [req.user.uid]
+      params
     );
-    res.json({ success: true, sessions: result.rows });
+    res.json({ success: true, sessions: result.rows, query });
   })
 );
 
@@ -226,6 +270,35 @@ router.get(
     );
     if (result.rowCount === 0) throw new AppError('会话未找到', 404);
     const session = result.rows[0];
+    const existingLastParams = session.last_params && typeof session.last_params === 'object'
+      ? session.last_params
+      : {};
+    if (!existingLastParams.workspace_type) {
+      const videoJobResult = await pool.query(
+        `SELECT id, status, progress, plan, output_url, error, created_at, updated_at
+         FROM video_jobs WHERE session_id = $1 AND uid = $2
+         ORDER BY created_at DESC LIMIT 1`,
+        [req.params.id, req.user.uid],
+      );
+      if (videoJobResult.rowCount > 0) {
+        const videoJob = videoJobResult.rows[0];
+        const isReplication = session.title?.includes('爆款') || (Array.isArray(videoJob.plan?.timed_texts) && videoJob.plan.timed_texts.length > 0);
+        session.last_params = {
+          ...existingLastParams,
+          workspace_type: isReplication ? 'viral_replication' : 'video_edit',
+          video_workspace: {
+            ...(existingLastParams.video_workspace || {}),
+            mode: isReplication ? 'viral_structure_replication' : 'video_edit',
+            plan: videoJob.plan || {},
+            job: videoJob,
+          },
+        };
+        await pool.query(
+          'UPDATE doubao_agent_sessions SET last_params = $1 WHERE session_id = $2 AND uid = $3',
+          [JSON.stringify(session.last_params), req.params.id, req.user.uid],
+        );
+      }
+    }
     const assetResult = await pool.query(
       `SELECT id, name, url, source, metrics, created_at
        FROM assets WHERE session_id = $1 AND uid = $2 ORDER BY created_at`,
@@ -262,15 +335,30 @@ router.post(
       ? requestedSessionId
       : 'session-' + crypto.randomUUID();
     const title = req.body.title || '新设计会话';
+    const requestedWorkspaceType = String(req.body.workspace_type || 'image_design');
+    const workspaceType = ['image_design', 'video_edit', 'viral_replication'].includes(requestedWorkspaceType)
+      ? requestedWorkspaceType
+      : 'image_design';
+    const requestedLastParams = req.body.last_params && typeof req.body.last_params === 'object' && !Array.isArray(req.body.last_params)
+      ? req.body.last_params
+      : {};
+    const lastParams = { ...requestedLastParams, workspace_type: workspaceType };
     await pool.query(
       `INSERT INTO doubao_agent_sessions (session_id, uid, title, current_state, chat_history, last_params)
        VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (session_id) DO NOTHING`,
-      [sessionId, uid, title, 'COLLECTING_INFO', JSON.stringify([]), JSON.stringify({})]
+      [sessionId, uid, title, workspaceType === 'image_design' ? 'COLLECTING_INFO' : 'VIDEO_EDITING', JSON.stringify([]), JSON.stringify(lastParams)]
     );
     res.json({
       success: true,
-      session: { session_id: sessionId, title, current_state: 'COLLECTING_INFO', chat_history: [], last_params: {} }
+      session: {
+        session_id: sessionId,
+        title,
+        current_state: workspaceType === 'image_design' ? 'COLLECTING_INFO' : 'VIDEO_EDITING',
+        chat_history: [],
+        last_params: lastParams,
+        workspace_type: workspaceType,
+      }
     });
   })
 );
@@ -280,7 +368,11 @@ router.delete(
   '/sessions/:id',
   authenticateSession,
   asyncHandler(async (req, res) => {
-    await pool.query('DELETE FROM doubao_agent_sessions WHERE session_id = $1 AND uid = $2', [req.params.id, req.user.uid]);
+    const result = await pool.query(
+      'DELETE FROM doubao_agent_sessions WHERE session_id = $1 AND uid = $2 RETURNING session_id',
+      [req.params.id, req.user.uid],
+    );
+    if (result.rowCount === 0) throw new AppError('会话不存在或已被删除', 404);
     res.json({ success: true, message: '会话已删除' });
   })
 );
@@ -290,7 +382,7 @@ router.put(
   '/sessions/:id',
   authenticateSession,
   asyncHandler(async (req, res) => {
-    const { title, canvas_state } = req.body;
+    const { title, canvas_state, last_params, current_state } = req.body;
     const uid = req.user.uid;
     const sid = req.params.id;
 
@@ -307,9 +399,24 @@ router.put(
       setClauses.push(`canvas_state = $${paramIdx++}`);
       values.push(JSON.stringify(canvas_state));
     }
+    if (last_params !== undefined) {
+      if (!last_params || typeof last_params !== 'object' || Array.isArray(last_params)) {
+        throw new AppError('工作台状态格式错误', 400);
+      }
+      const serialized = JSON.stringify(last_params);
+      if (serialized.length > 250_000) throw new AppError('工作台状态数据过大', 400);
+      setClauses.push(`last_params = COALESCE(last_params, '{}'::jsonb) || $${paramIdx++}::jsonb`);
+      values.push(serialized);
+    }
+    if (current_state !== undefined) {
+      const allowedStates = ['COLLECTING_INFO', 'GENERATING_IMAGES', 'DONE', 'VIDEO_EDITING', 'VIDEO_RENDERING'];
+      if (!allowedStates.includes(current_state)) throw new AppError('会话状态无效', 400);
+      setClauses.push(`current_state = $${paramIdx++}`);
+      values.push(current_state);
+    }
 
     if (setClauses.length === 0) {
-      throw new AppError('缺少要更新的字段 (title 或 canvas_state)', 400);
+      throw new AppError('缺少要更新的会话字段', 400);
     }
 
     setClauses.push('updated_at = CURRENT_TIMESTAMP');
@@ -401,6 +508,33 @@ router.put(
 // ─────────────────────────────────────────────────────────────────────────────
 // 8.8 POST /api/agent/analyze-product-image — 商品图多模态分析（透传）
 // ─────────────────────────────────────────────────────────────────────────────
+
+router.post(
+  '/tools/reverse-image-prompt',
+  authenticateSession,
+  asyncHandler(async (req, res) => {
+    const imageBase64 = String(req.body?.image_base64 || '');
+    if (!imageBase64.startsWith('data:image/')) {
+      throw new AppError('请上传有效的参考图片', 400);
+    }
+    const pythonResponse = await fetchWithRetries(`${AI_SERVICE_URL}/agent/tools/reverse-image-prompt`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Internal-Token': process.env.MEDIA_INDEX_INTERNAL_TOKEN || config.JWT_SECRET || '',
+      },
+      body: JSON.stringify({
+        image_base64: imageBase64,
+        composition_preference: String(req.body?.composition_preference || 'auto').slice(0, 80),
+      }),
+    }, { attempts: 2, timeoutMs: 120_000 });
+    const data = await pythonResponse.json().catch(() => ({}));
+    if (!pythonResponse.ok) {
+      throw new AppError(data.detail || '图片提示词反推失败', pythonResponse.status >= 500 ? 502 : 400);
+    }
+    res.json(data);
+  })
+);
 
 router.post(
   '/analyze-product-image',
@@ -504,6 +638,18 @@ router.put(
        WHERE session_id = $4 AND uid = $5`,
       [JSON.stringify(confirmed), JSON.stringify(nextMemory), JSON.stringify(nextParams), req.params.id, req.user.uid]
     );
+
+    if (latestAsset.rows[0]?.id) {
+      indexMediaAsset({
+        uid: req.user.uid,
+        asset_id: latestAsset.rows[0].id,
+        session_id: req.params.id,
+        media_type: 'image',
+        analysis: confirmed,
+      }).catch((error) => {
+        console.warn(`[MediaIndex] Confirmed product ${latestAsset.rows[0].id} was not indexed:`, error.message);
+      });
+    }
 
     res.json({ success: true, analysis: confirmed });
   })
@@ -730,10 +876,14 @@ router.post(
 
       const pythonResponse = await fetchWithRetries(`${AI_SERVICE_URL}/agent/run-stream`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Internal-Token': process.env.MEDIA_INDEX_INTERNAL_TOKEN || process.env.JWT_SECRET || '',
+        },
         body: JSON.stringify({
           current_phase: previousState,
           session_id: currentSessionId,
+          user_id: uid,
           chat_history: toModelConversationHistory(durableRequestHistory),
           message: message,
           product_name: clientProductName || previousParams.product_name || '',
@@ -1259,9 +1409,14 @@ router.post(
       console.log(`[Agent] Calling AI service. Phase: ${previousState}`);
       pythonResponse = await fetch(`${AI_SERVICE_URL}/agent/run`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Internal-Token': process.env.MEDIA_INDEX_INTERNAL_TOKEN || process.env.JWT_SECRET || '',
+        },
         body: JSON.stringify({
           current_phase: previousState,
+          session_id: currentSessionId,
+          user_id: uid,
           chat_history: toModelConversationHistory(previousHistory),
           message: message,
           product_name: previousParams.product_name || '',

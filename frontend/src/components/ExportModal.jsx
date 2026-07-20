@@ -1,6 +1,7 @@
-import React from 'react';
 import { Download, X, Image, FileImage, Check } from 'lucide-react';
 import './ExportModal.css';
+import { useState } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
 
 const QUALITY_OPTIONS = [
   { scale: 1, title: '标准标清', label: '1x', icon: 'SD', desc: '适合网页预览与快速发送', color: '#6b7280' },
@@ -25,6 +26,9 @@ export default function ExportModal({
   exportItems = [],
   isExporting = false,
 }) {
+  const [isVisible, setIsVisible] = useState(true);
+  const requestClose = () => setIsVisible(false);
+
   if (!isOpen) return null;
 
   const getEstMb = (scale) => {
@@ -42,15 +46,16 @@ export default function ExportModal({
   const currentEstMb = getEstMb(exportScale);
 
   return (
-    <div className="export-overlay" onClick={onClose}>
-      <div className="export-modal" onClick={(e) => e.stopPropagation()}>
+    <AnimatePresence onExitComplete={onClose}>
+    {isVisible && <motion.div className="export-overlay" onClick={requestClose} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.16 }}>
+      <motion.div className="export-modal" onClick={(e) => e.stopPropagation()} initial={{ opacity: 0, y: 8, scale: 0.985 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 5, scale: 0.99 }} transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}>
         {/* Header */}
         <div className="export-header">
           <div className="export-header-left">
             <Download size={20} />
             <h2>导出图片设置</h2>
           </div>
-          <button className="export-close" onClick={onClose}>
+          <button className="export-close" onClick={requestClose}>
             <X size={18} />
           </button>
         </div>
@@ -124,12 +129,13 @@ export default function ExportModal({
 
         {/* Actions */}
         <div className="export-actions">
-          <button className="export-btn-cancel" onClick={onClose}>取消</button>
+          <button className="export-btn-cancel" onClick={requestClose}>取消</button>
           <button className="export-btn-confirm" onClick={onConfirm} disabled={isExporting}>
             {isExporting ? '导出中...' : '开始导出'}
           </button>
         </div>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>}
+    </AnimatePresence>
   );
 }

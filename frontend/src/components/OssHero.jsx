@@ -1,8 +1,7 @@
 // src/components/OssHero.jsx
-import React from 'react';
 import { motion } from 'motion/react';
 import {
-  Layers, Users, Wand2, Zap, ArrowRight, ChevronDown,
+  Layers, Users, Zap, ArrowRight, ChevronDown,
   ShoppingBag, Scissors, Palette, ImagePlus, Upload, Download
 } from 'lucide-react';
 
@@ -104,7 +103,7 @@ export default function OssHero({ onEnter }) {
           >
             {[
               { icon: Users, label: '多 Agent 协作' },
-              { icon: Wand2, label: '智能 AI 抠图' },
+              { icon: null, label: '智能 AI 抠图' },
               { icon: Layers, label: '无限协作画布' },
               { icon: Zap, label: '秒级生成' },
             ].map((feat, i) => (
@@ -116,7 +115,7 @@ export default function OssHero({ onEnter }) {
                   visible: { opacity: 1, y: 0, transition: spring() }
                 }}
               >
-                <feat.icon size={12} />
+                {feat.icon && <feat.icon size={12} />}
                 {feat.label}
               </motion.div>
             ))}
@@ -181,14 +180,14 @@ export default function OssHero({ onEnter }) {
                 desc: '自由拖拽图层、添加文字、绘制标注，支持多人实时协作编辑，所见即所得的创作体验。',
               },
               {
-                icon: Zap,
+                icon: null,
                 title: '秒级出图',
                 desc: '从输入需求到生成可投放电商主图，全流程自动化，三分钟内即可获得多套设计方案。',
               },
               {
                 icon: ShoppingBag,
                 title: '多场景覆盖',
-                desc: '支持商品主图、详情页、A+ 页面、爆款视频封面等多种电商视觉场景一键生成。',
+                desc: '支持商品主图、详情页、A+ 页面、短视频封面等多种电商视觉场景一键生成。',
               },
               {
                 icon: Download,
@@ -246,7 +245,7 @@ export default function OssHero({ onEnter }) {
               },
               {
                 step: '02',
-                icon: Wand2,
+                icon: Zap,
                 title: 'AI 生成',
                 desc: '多 Agent 自动协作，生成文案、设计视觉、评估优化，迭代至最佳效果。',
               },
@@ -273,9 +272,7 @@ export default function OssHero({ onEnter }) {
                 }}
               >
                 <div className="oss-hero-step-num">{item.step}</div>
-                <div className="oss-hero-step-icon">
-                  <item.icon size={22} />
-                </div>
+                {item.icon && <div className="oss-hero-step-icon"><item.icon size={22} /></div>}
                 <div className="oss-hero-step-text">
                   <h3>{item.title}</h3>
                   <p>{item.desc}</p>

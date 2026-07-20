@@ -1,8 +1,9 @@
 // src/components/Onboarding.jsx
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { Cpu, ShoppingBag, Tag, Image as ImageIcon, Upload, CheckCircle2, FolderHeart } from 'lucide-react';
 import CloseButton from './CloseButton';
 import { useApp } from '../context/AppContext';
+import { AnimatePresence, motion } from 'motion/react';
 
 const VISUAL_STYLES = [
   { id: 'french_vintage', name: '法式复古风格', description: '暖金逆光、法式庄园、优雅慵懒' },
@@ -23,6 +24,8 @@ export default function Onboarding({ onSubmit, onClose, initialValues, currentUs
   const [customImage, setCustomImage] = useState(null);
   const [customFileName, setCustomFileName] = useState('');
   const [selectedGalleryAsset, setSelectedGalleryAsset] = useState(null);
+  const [isVisible, setIsVisible] = useState(true);
+  const requestClose = () => setIsVisible(false);
 
   // Pre-fill initial values if sent from Portal command center
   useEffect(() => {
@@ -81,9 +84,10 @@ export default function Onboarding({ onSubmit, onClose, initialValues, currentUs
   const rawAssets = (uploadedAssets || []).filter(a => a.type === 'raw');
 
   return (
-    <div className="onboarding-modal-overlay">
-      <div className="onboarding-modal-content animate-fade-scale" style={{ maxWidth: '560px', width: '90%' }}>
-        <CloseButton onClick={onClose} />
+    <AnimatePresence onExitComplete={onClose}>
+    {isVisible && <motion.div className="onboarding-modal-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.16 }}>
+      <motion.div className="onboarding-modal-content" initial={{ opacity: 0, y: 8, scale: 0.985 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 5, scale: 0.99 }} transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }} style={{ maxWidth: '560px', width: '90%' }}>
+        <CloseButton onClick={requestClose} />
 
         <div className="onboarding-header" style={{ marginBottom: '12px' }}>
           <div className="logo-section" style={{ justifyContent: 'center', marginBottom: '4px' }}>
@@ -320,7 +324,8 @@ export default function Onboarding({ onSubmit, onClose, initialValues, currentUs
             启动 AI 抠图并生成商品图
           </button>
         </form>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>}
+    </AnimatePresence>
   );
 }

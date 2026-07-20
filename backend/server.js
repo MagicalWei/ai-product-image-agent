@@ -28,6 +28,7 @@ import paymentRouter, { setPool as setPaymentPool } from './routes/payment.js';
 import assetsRouter, { setPool as setAssetsPool } from './routes/assets.js';
 import aiRouter, { setPool as setAiPool } from './routes/ai.js';
 import agentRouter, { setPool as setAgentPool } from './routes/agent.js';
+import videoRouter, { setPool as setVideoPool } from './routes/video.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -62,7 +63,7 @@ app.use((_req, res, next) => {
       "img-src 'self' data: blob: https:",
       "connect-src 'self' ws: wss:",
       "font-src 'self' https: data:",
-      "media-src 'self'",
+      "media-src 'self' blob: https:",
       "object-src 'none'",
       "frame-src 'self' https://js.stripe.com",
       "base-uri 'self'",
@@ -136,6 +137,14 @@ app.use('/api/payment', paymentRouter);
 app.use('/api/assets', assetsRouter);
 app.use('/api/ai', aiRouter);
 app.use('/api/agent', agentRouter);
+app.use('/api/video', videoRouter);
+
+// Lightweight container/orchestrator liveness probe. Keep this endpoint free
+// of database and AI calls so a temporary upstream outage does not cause the
+// backend container to be killed and restarted in a loop.
+app.get('/api/health', (_req, res) => {
+  res.json({ status: 'ok', service: 'backend' });
+});
 
 // ─── Swagger UI (development only) ────────────────────────────────────────────
 if (config.NODE_ENV !== 'production') {
@@ -163,6 +172,7 @@ setPaymentPool(pool);
 setAssetsPool(pool);
 setAiPool(pool);
 setAgentPool(pool);
+setVideoPool(pool);
 
 const server = app.listen(PORT, () => {
   console.log('============================================');

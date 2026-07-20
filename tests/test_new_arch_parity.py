@@ -570,14 +570,14 @@ class TestActionCoverage:
 
         expected = {
             "generate_layer",
-            "inpaint_region",
-            "remove_background",
-            "compose",
-            "upscale",
             "layout_suggest",
             "search_knowledge",
             "style_transfer_batch",
             "generate_product_set",
+            "plan_video_edit",
+            "plan_viral_replication",
+            "reverse_image_prompt",
         }
         actual = set(ACTION_REGISTRY.keys())
         assert actual == expected, f"Action mismatch. Extra: {actual - expected}, Missing: {expected - actual}"
+        assert not {"inpaint_region", "remove_background", "compose", "upscale"} & actual

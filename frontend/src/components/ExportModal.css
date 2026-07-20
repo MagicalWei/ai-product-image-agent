@@ -9,7 +9,6 @@
   background: oklch(0 0 0 / 0.35);
   backdrop-filter: blur(16px) saturate(150%);
   -webkit-backdrop-filter: blur(16px) saturate(150%);
-  animation: exportFadeIn 0.2s ease-out;
 }
 
 @keyframes exportFadeIn {
@@ -35,7 +34,6 @@
   display: flex;
   flex-direction: column;
   gap: 20px;
-  animation: exportSlideUp 0.25s ease-out;
 }
 
 @keyframes exportSlideUp {

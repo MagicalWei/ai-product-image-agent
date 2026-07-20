@@ -1,287 +1,219 @@
-// src/components/Portal.jsx
-import React, { useState, useRef } from 'react';
-import { motion } from 'motion/react';
+import { useRef, useState } from 'react';
 import {
-  ShoppingBag, Scissors, BookOpen, Award, Video, Layers,
-  Image as ImageIcon, Plus, Box, Lightbulb, ImagePlus, ChevronLeft, ChevronRight,
-  Crown
+  ArrowUp, ChevronDown, Film, Image as ImageIcon, Paperclip,
+  Palette, Plus, X,
 } from 'lucide-react';
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 
-export default function Portal({ onStartOnboarding, onQuickToolClick, onDirectAgentStart, onImageUploaded, onProductImageSelected, onOpenPricing }) {
-  const [carouselIndex, setCarouselIndex] = useState(0);
+const SUGGESTIONS = [
+  '为商品制作一张高转化主图',
+  '提炼卖点并生成卖点图',
+  '制作完整的 A+/详情页',
+  '参考样图风格生成商品套图',
+];
 
+const MAX_VIDEO_DURATION_SECONDS = 60;
 
-  const quickTools = [
-    { id: 'set', name: '商品套图', icon: ShoppingBag },
-    { id: 'cut', name: '智能抠图', icon: Scissors },
-    { id: 'detail', name: 'A+/详情页', icon: BookOpen },
-    { id: 'cert', name: '证件照', icon: Award },
-    { id: 'video_viral', name: '爆款视频', icon: Video },
-    { id: 'copy', name: '爆款图复刻', icon: Layers },
-    { id: 'ai_img', name: 'AI商品图', icon: ImageIcon },
+const readAsDataUrl = file => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => resolve(reader.result);
+  reader.onerror = () => reject(reader.error || new Error('文件读取失败'));
+  reader.readAsDataURL(file);
+});
+
+const getVideoDuration = file => new Promise((resolve) => {
+  const url = URL.createObjectURL(file);
+  const video = document.createElement('video');
+  video.preload = 'metadata';
+  video.onloadedmetadata = () => {
+    resolve(Number(video.duration || 0));
+    URL.revokeObjectURL(url);
+  };
+  video.onerror = () => {
+    resolve(0);
+    URL.revokeObjectURL(url);
+  };
+  video.src = url;
+});
+
+export default function Portal({ onQuickToolClick, onDirectAgentStart }) {
+  const shouldReduceMotion = useReducedMotion();
+  const [prompt, setPrompt] = useState('');
+  const [mode, setMode] = useState('product');
+  const [productImages, setProductImages] = useState([]);
+  const [styleReference, setStyleReference] = useState(null);
+  const [videos, setVideos] = useState([]);
+  const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const productInputRef = useRef(null);
+  const styleInputRef = useRef(null);
+  const videoInputRef = useRef(null);
+
+  const addProductImages = async event => {
+    const files = Array.from(event.target.files || []).slice(0, Math.max(0, 4 - productImages.length));
+    event.target.value = '';
+    if (!files.length) return;
+    setError('');
+    const additions = await Promise.all(files.map(async file => ({
+      id: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${file.name}`,
+      name: file.name,
+      base64: await readAsDataUrl(file),
+    })));
+    setProductImages(current => [...current, ...additions].slice(0, 4));
+  };
+
+  const addStyleReference = async event => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    setError('');
+    setStyleReference({
+      id: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${file.name}`,
+      name: file.name,
+      base64: await readAsDataUrl(file),
+    });
+  };
+
+  const addVideos = async event => {
+    const files = Array.from(event.target.files || []).slice(0, Math.max(0, 4 - videos.length));
+    event.target.value = '';
+    if (!files.length) return;
+    const inspected = await Promise.all(files.map(async file => ({ file, duration: await getVideoDuration(file) })));
+    const tooLong = inspected.find(item => item.duration > MAX_VIDEO_DURATION_SECONDS + 0.05);
+    if (tooLong) {
+      setError(`“${tooLong.file.name}”超过 ${MAX_VIDEO_DURATION_SECONDS} 秒，请先裁剪后再上传。`);
+      return;
+    }
+    setError('');
+    setVideos(current => [...current, ...inspected.map(item => ({
+      id: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${item.file.name}`,
+      name: item.file.name,
+      file: item.file,
+      duration: item.duration,
+    }))].slice(0, 4));
+  };
+
+  const submit = async () => {
+    const instruction = prompt.trim();
+    if (!instruction) {
+      setError('请先描述你想制作的内容。');
+      return;
+    }
+    if (mode === 'video' && videos.length === 0) {
+      setError(`请先上传至少一个 ${MAX_VIDEO_DURATION_SECONDS} 秒以内的视频素材。`);
+      return;
+    }
+    setError('');
+    setSubmitting(true);
+    try {
+      if (mode === 'video') {
+        onQuickToolClick?.('video_edit', { instruction, sourceFiles: videos.map(item => item.file) });
+      } else {
+        await onDirectAgentStart?.(instruction, productImages[0] || null, {
+          productImages,
+          styleReference,
+        });
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const attachments = mode === 'video' ? videos : [
+    ...productImages.map(item => ({ ...item, kind: '商品图' })),
+    ...(styleReference ? [{ ...styleReference, kind: '风格参考' }] : []),
   ];
 
-  const fileInputRef = useRef(null);
-  const [isDragOver, setIsDragOver] = useState(false);
-  const [attachedImage, setAttachedImage] = useState(null);
-  const [attachedDoc, setAttachedDoc] = useState(null);
-  const attachInputRef = useRef(null);
-  const docInputRef = useRef(null);
-  const skillInputRef = useRef(null);
-
-  const [showSkillModal, setShowSkillModal] = useState(false);
-  const [customSkillApplied, setCustomSkillApplied] = useState(false);
-
-  const [skillMdContent, setSkillMdContent] = useState('');
-
-  const handleFileChange = (e) => {
-    const files = Array.from(e.target.files);
-    if (files.length > 0) {
-      handleFilesSelected(files);
-    }
-  };
-
-  const handleFilesSelected = async (files) => {
-    const list = [];
-    for (let file of files) {
-      const base64Url = await new Promise((resolve) => {
-        const reader = new FileReader();
-        reader.onload = (re) => resolve(re.target.result);
-        reader.readAsDataURL(file);
-      });
-      if (onProductImageSelected) {
-        onProductImageSelected(base64Url, file.name);
-      }
-      let urlToUse = base64Url;
-      if (onImageUploaded) {
-        try {
-          const uploadedAsset = await onImageUploaded(file.name, base64Url, 'raw');
-          if (uploadedAsset && uploadedAsset.url) {
-            urlToUse = uploadedAsset.url;
-          }
-        } catch (e) {
-          console.error("Failed to upload image during portal selection:", e);
-        }
-      }
-      list.push({ name: file.name, base64: urlToUse });
-    }
-    onStartOnboarding({
-      uploadType: 'custom',
-      multipleImages: list
-    });
-  };
-
-  const handleDragOver = (e) => {
-    e.preventDefault();
-    setIsDragOver(true);
-  };
-
-  const handleDragLeave = () => {
-    setIsDragOver(false);
-  };
-
-  const handleDrop = (e) => {
-    e.preventDefault();
-    setIsDragOver(false);
-    const files = Array.from(e.dataTransfer.files);
-    if (files.length > 0) {
-      handleFilesSelected(files);
-    }
-  };
-
-  const handleAttachClick = () => {
-    attachInputRef.current?.click();
-  };
-
-  const handleAttachChange = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (readerEvent) => {
-      setAttachedImage({
-        name: file.name,
-        base64: readerEvent.target.result
-      });
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const handleDocChange = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    const sizeStr = file.size > 1024 * 1024
-      ? (file.size / (1024 * 1024)).toFixed(2) + ' MB'
-      : (file.size / 1024).toFixed(1) + ' KB';
-
-    setAttachedDoc({
-      name: file.name,
-      size: sizeStr
-    });
-    e.target.value = '';
-  };
-
-  const handleSkillFileUpload = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      setSkillMdContent(evt.target.result);
-    };
-    reader.readAsText(file);
-    e.target.value = '';
-  };
-
-  const handleSaveSkill = () => {
-    setShowSkillModal(false);
-    setCustomSkillApplied(true);
-    try {
-      localStorage.setItem('custom_skill_md', skillMdContent);
-    } catch (err) {
-      console.warn("Failed to save custom skill:", err);
-    }
-  };
-
   return (
-    <div className="portal-container animate-fade-scale">
+    <motion.main
+      className="portal-container portal-home"
+      initial={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: shouldReduceMotion ? 0.1 : 0.2, ease: [0.22, 1, 0.36, 1] }}
+    >
+      <section className="portal-home-inner" aria-labelledby="portal-title">
+        <div className="portal-kicker">AI 商品创作 Agent</div>
+        <h1 id="portal-title">今天想为哪个商品做设计？</h1>
+        <p className="portal-subtitle">上传商品素材并说出目标，Agent 会理解商品、规划内容并完成创作。</p>
 
-      {/* 3. Three-column Tool Grid */}
-      <div className="tool-grid">
-        {/* Col 1: Image Edit */}
-        <div
-          className={`tool-card glass-pane glass-pane-interactive ${isDragOver ? 'drag-over' : ''}`}
-          onClick={() => fileInputRef.current?.click()}
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onDrop={handleDrop}
-          style={{
-            border: isDragOver ? '2px dashed var(--primary)' : '1px solid var(--border-glass)',
-            background: isDragOver ? 'rgba(0, 88, 188, 0.05)' : 'rgba(255, 255, 255, 0.02)',
-            cursor: 'pointer'
-          }}
-        >
-          <input
-            type="file"
-            ref={fileInputRef}
-            onChange={handleFileChange}
-            accept="image/*"
-            multiple
-            style={{ display: 'none' }}
+        <div className="portal-composer">
+          <textarea
+            value={prompt}
+            onChange={event => setPrompt(event.target.value)}
+            onKeyDown={event => {
+              if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') submit();
+            }}
+            placeholder={mode === 'product'
+              ? '例如：为这款保温杯制作自然户外风格的主图、卖点图和详情图…'
+              : '例如：提取商品最清晰的镜头，剪成节奏紧凑的 9:16 信息流视频…'}
+            aria-label="描述商品设计需求"
           />
-          <div>
-            <div className="tool-card-title">图片编辑</div>
-            <div className="tool-card-desc">导入商品模版，智能替换商品与模特背景</div>
-          </div>
-          <div className="placeholder-box-glass">
-            <div style={{ textAlign: 'center' }}>
-              <ImagePlus size={32} style={{ opacity: 0.3, marginBottom: '8px' }} />
-              <div style={{ fontSize: '0.75rem', opacity: 0.5 }}>点击导入或拖拽商品图</div>
-            </div>
-          </div>
-        </div>
 
-        {/* Col 2: Create Design */}
-        <div className="tool-card glass-pane glass-pane-interactive" onClick={() => onStartOnboarding(null)}>
-          <div>
-            <div className="tool-card-title">创建设计</div>
-            <div className="tool-card-desc">从空白画布自由设计定制化商品主图</div>
-          </div>
-          <div className="dashed-create-box">
-            <Plus size={24} style={{ opacity: 0.6 }} />
-          </div>
-        </div>
-
-        {/* Col 3: Quick Tool Icons Grid */}
-        <div className="tool-card glass-pane">
-          <div>
-            <div className="tool-card-title">快捷工具</div>
-            <div className="tool-card-desc">一键启动垂直创意小工具</div>
-          </div>
-          <div className="quick-tools-grid">
-            {quickTools.map(tool => {
-              const Icon = tool.icon;
-              return (
-                <div
-                  key={tool.id}
-                  className="quick-tool-item"
-                  onClick={() => onQuickToolClick(tool.id)}
+          <AnimatePresence initial={false}>
+          {attachments.length > 0 && (
+            <motion.div className="portal-attachments" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+              <AnimatePresence initial={false} mode="popLayout">
+              {attachments.map(item => (
+                <motion.div
+                  layout
+                  className="portal-attachment"
+                  key={item.id}
+                  initial={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, y: 4, scale: 0.97 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, y: -3, scale: 0.97 }}
+                  transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
                 >
-                  <Icon size={18} className="quick-tool-icon" />
-                  <span className="quick-tool-name">{tool.name}</span>
-                </div>
-              );
-            })}
+                  {item.base64
+                    ? <img src={item.base64} alt="" />
+                    : <span className="portal-video-thumb"><Film size={18} /></span>}
+                  <span><b>{item.kind || '视频'}</b>{item.name}</span>
+                  <button type="button" aria-label={`移除 ${item.name}`} onClick={() => {
+                    if (item.kind === '风格参考') setStyleReference(null);
+                    else if (mode === 'video') setVideos(current => current.filter(file => file.id !== item.id));
+                    else setProductImages(current => current.filter(image => image.id !== item.id));
+                  }}><X size={13} /></button>
+                </motion.div>
+              ))}
+              </AnimatePresence>
+            </motion.div>
+          )}
+          </AnimatePresence>
+
+          <div className="portal-composer-actions">
+            <div className="portal-composer-tools">
+              <button type="button" className="portal-icon-button" onClick={() => (mode === 'video' ? videoInputRef : productInputRef).current?.click()} title="上传素材">
+                <Plus size={19} />
+              </button>
+              <button type="button" className="portal-mode-button" onClick={() => setMode(current => current === 'product' ? 'video' : 'product')}>
+                {mode === 'product' ? <ImageIcon size={16} /> : <Film size={16} />}
+                {mode === 'product' ? '商品图' : '智能剪辑'}
+                <ChevronDown size={14} />
+              </button>
+              {mode === 'product' && (
+                <>
+                  <button type="button" className="portal-tool-button" onClick={() => productInputRef.current?.click()}><Paperclip size={15} />商品素材</button>
+                  <button type="button" className={`portal-tool-button ${styleReference ? 'active' : ''}`} onClick={() => styleInputRef.current?.click()}><Palette size={15} />风格参考</button>
+                </>
+              )}
+              {mode === 'video' && <button type="button" className="portal-tool-button" onClick={() => videoInputRef.current?.click()}><Film size={15} />视频素材 · 最长60秒</button>}
+            </div>
+            <button type="button" className="portal-submit" disabled={submitting || !prompt.trim()} onClick={submit} aria-label="发送需求">
+              <ArrowUp size={19} />
+            </button>
           </div>
         </div>
-      </div>
 
-      {/* Design Skill Modal */}
-      {showSkillModal && (
-        <div className="settings-modal-overlay" onClick={() => setShowSkillModal(false)} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 1050 }}>
-          <div className="settings-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '540px', width: '90%' }}>
-            <div className="settings-modal-header">
-              <h3 className="settings-modal-title" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <Lightbulb size={18} style={{ color: 'var(--primary)' }} />
-                <span>AI 设计 Skill 配置中心</span>
-              </h3>
-              <button className="settings-close-btn" style={{ padding: '4px', height: 'auto', width: 'auto', border: 'none', background: 'none', fontSize: '1.5rem', cursor: 'pointer', color: 'var(--text-secondary)' }} onClick={() => setShowSkillModal(false)}>&times;</button>
-            </div>
-
-            <div className="settings-modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '12px', padding: '0 20px 20px 20px' }}>
-              <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', lineHeight: '1.4' }}>
-                通过加载自定义的 <strong>SKILL.md</strong> 设计规则，可以让 AI 视觉设计师、文案策划和排版引擎自动遵循您所设定的设计美学、比例构图与品牌文案风格。
-              </div>
-
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '4px' }}>
-                <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--on-surface)' }}>规则编辑器 (SKILL.md)</span>
-                <button
-                  type="button"
-                  className="settings-btn cancel"
-                  onClick={() => skillInputRef.current?.click()}
-                  style={{
-                    padding: '4px 10px',
-                    fontSize: '0.7rem',
-                    width: 'auto',
-                    border: '1px solid var(--outline-variant)',
-                    cursor: 'pointer'
-                  }}
-                >
-                  📤 上传本地 SKILL.md
-                </button>
-              </div>
-
-              <textarea
-                value={skillMdContent}
-                onChange={(e) => setSkillMdContent(e.target.value)}
-                style={{
-                  width: '100%',
-                  height: '180px',
-                  padding: '10px',
-                  borderRadius: '8px',
-                  border: '1px solid var(--outline-variant)',
-                  background: 'var(--surface-container-low, rgba(0,0,0,0.02))',
-                  color: 'var(--on-surface)',
-                  fontFamily: 'monospace',
-                  fontSize: '0.7rem',
-                  lineHeight: '1.4',
-                  resize: 'none'
-                }}
-                placeholder="# SKILL: 自定义设计规范\n..."
-              />
-
-              <div className="settings-actions" style={{ marginTop: '8px' }}>
-                <button className="settings-btn cancel" type="button" onClick={() => setShowSkillModal(false)}>
-                  取消
-                </button>
-                <button className="settings-btn save" type="button" onClick={handleSaveSkill}>
-                  保存并应用此 Skill
-                </button>
-              </div>
-            </div>
-          </div>
+        {error && <div className="portal-error" role="alert">{error}</div>}
+        <div className="portal-suggestions" aria-label="快捷需求">
+          {SUGGESTIONS.map(suggestion => (
+            <button type="button" key={suggestion} onClick={() => setPrompt(suggestion)}>{suggestion}</button>
+          ))}
         </div>
-      )}
-    </div>
+
+        <input ref={productInputRef} hidden type="file" multiple accept="image/*" onChange={addProductImages} />
+        <input ref={styleInputRef} hidden type="file" accept="image/*" onChange={addStyleReference} />
+        <input ref={videoInputRef} hidden type="file" multiple accept="video/mp4,video/quicktime,video/webm" onChange={addVideos} />
+      </section>
+    </motion.main>
   );
 }

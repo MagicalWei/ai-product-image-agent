@@ -432,7 +432,7 @@ class SenseDecideActReviewLoop:
             action_config = {
                 **action_params_raw,
                 "image_model_key": self._image_config.get("api_key", ""),
-                "aspect_ratio": getattr(memory, "aspect_ratio", "1:1"),
+                "aspect_ratio": action_params_raw.get("aspect_ratio") or getattr(memory, "aspect_ratio", "1:1"),
                 "negative_prompt": getattr(memory, "negative_prompt", "低画质、变形肢体、模糊、水印"),
                 "size_doubao": self._image_config.get("size", "1920x1920"),
                 "rag_retriever": rag_retriever,
@@ -506,6 +506,41 @@ class SenseDecideActReviewLoop:
                     enriched_ctx.rag_context += "\n" + (data.get("context", "")[:500])
                 last_action = action_name
                 continue
+
+            if action_name == "reverse_image_prompt":
+                reverse_prompt = data.get("reverse_prompt") or {}
+                message = (
+                    "图片提示词已反推完成。\n\n"
+                    f"中文 Prompt：{reverse_prompt.get('prompt_cn', '')}\n\n"
+                    f"English Prompt：{reverse_prompt.get('prompt_en', '')}\n\n"
+                    f"Negative Prompt：{reverse_prompt.get('negative_prompt', '')}"
+                )
+                yield {"event": "reverse_prompt_result", "result": reverse_prompt, "message": message}
+                yield {"event": "agent_message", "agent": "agent", "text": message}
+                memory.add_chat_turn("assistant", message)
+                yield {"event": "memory_updated", "agent_memory": memory.to_dict()}
+                yield {"event": "done"}
+                return
+
+            if action_name == "plan_video_edit":
+                plan = data.get("video_edit_plan") or {}
+                message = data.get("message") or "剪辑方案已准备好，请选择视频素材后执行。"
+                yield {"event": "video_edit_plan", "plan": plan, "message": message}
+                yield {"event": "agent_message", "agent": "agent", "text": message}
+                memory.add_chat_turn("assistant", message)
+                yield {"event": "memory_updated", "agent_memory": memory.to_dict()}
+                yield {"event": "done"}
+                return
+
+            if action_name == "plan_viral_replication":
+                plan = data.get("viral_replication_plan") or {}
+                message = data.get("message") or "爆款结构复刻工作台已准备好。"
+                yield {"event": "viral_replication_plan", "plan": plan, "message": message}
+                yield {"event": "agent_message", "agent": "agent", "text": message}
+                memory.add_chat_turn("assistant", message)
+                yield {"event": "memory_updated", "agent_memory": memory.to_dict()}
+                yield {"event": "done"}
+                return
 
             if "url" in data:
                 img_url = data["url"]
@@ -854,14 +889,13 @@ class SenseDecideActReviewLoop:
             ]
         action_descriptions = {
             "generate_layer": "生成一个新图层图片。params: layer_type (subject/background/text/decoration), prompt (英文), style_tags",
-            "inpaint_region": "局部重绘某个图层的区域。params: layer_id, bbox (x,y,width,height), prompt",
-            "remove_background": "移除图层背景（抠图）。params: layer_id",
-            "compose": "多图层合成为最终图片。params: layer_ids (要合成的图层ID列表)",
-            "upscale": "超分辨率放大图层。params: layer_id, scale_factor (2或4)",
             "layout_suggest": "AI建议图层布局。params: image_types (图片类型列表)",
             "search_knowledge": "搜索RAG知识库获取 prompt 模板/风格指南/平台规则。params: query (搜索词), categories (分类列表，可选: prompt_template, style_guide, platform_rule, copywriting)",
             "generate_product_set": "基于商品原图生成一组电商图片，可用于A+/详情页、主图、卖点图和续作。必填 params.image_types，值只能从 main、selling_point、detail 中选择；可选 product_name、selling_points、style_preference",
             "style_transfer_batch": "需要商品图和明确上传的风格参考图；把参考图的视觉语言迁移到新商品。必填 params.image_types，值只能从 main、selling_point、detail 中选择；可选 product_name、selling_points",
+            "plan_video_edit": "为视频裁剪、拼接、横竖屏转换、文字叠加、淡入淡出和背景音乐生成结构化剪辑方案。参数可含 aspect_ratio、clips、overlay_text、text_position、original_volume、music_volume、fade、fps；该动作不生成图片",
+            "plan_viral_replication": "打开爆款结构复刻工作台。用于上传不超过60秒的参考视频，拆解钩子、节奏、镜头结构和CTA，再用新商品素材原创复刻。参数可含 strength(light/medium/high)。",
+            "reverse_image_prompt": "使用多模态模型从已上传图片反推可见主体、构图、镜头、光线、配色和原创生图提示词。参数可含 composition_preference。",
         }
 
         # Build decide prompt
@@ -1094,17 +1128,19 @@ class SenseDecideActReviewLoop:
             "1. 如果画布为空且用户需要生成图片 → generate_layer (subject)\n"
             "2. A+/详情页、商品套图、沿用商品继续生成 → generate_product_set；由 image_types 指定输出类型\n"
             "3. 有风格参考图且目标是风格迁移 → style_transfer_batch\n"
+            "4. 用户要求剪辑、拼接、转码或制作已有素材视频 → plan_video_edit\n"
+            "5. 用户明确要求复刻爆款视频、参考视频结构或同款视频节奏 → plan_viral_replication\n"
+            "6. 用户明确要求看图反推、提取或生成提示词 → reverse_image_prompt\n"
             "   未标注用途的参考附件不是自动风格迁移指令；结合用户目标判断。用户明确说“按这个风格”等且有参考附件时，可将其作为风格参考。\n"
-            "4. 单张自由创作或单图编辑 → generate_layer，并使用商品原图作为 reference_images\n"
-            "5. Action 返回图片后，结合目标和当前结果决定继续、审查或 finish\n"
-            "6. 如果用户信息不足 → chat 询问；用户闲聊 → chat 回复\n"
-            "7. 多图层需要合并时 → compose\n"
-            "8. 不要连续执行无进展的相同动作，检查重试次数避免死循环\n"
-            "9. 用户上传的商品图是商品身份唯一真源，不得替换或虚构商品特征\n"
-            "10. 对 prompt 或平台规则不确定时，可先 search_knowledge\n"
-            "11. 收到 Action 执行反馈时，必须修正 params 后重新调用；未生成目标图片前禁止 finish\n\n"
-            "12. 界面输入事实中的附件数量是后端已接收的权威事实；数量大于0时禁止回复‘未收到图片’或要求重新上传\n"
-            "13. region_edit_requested=true 且用户提出修改要求时，选择 generate_layer；框选图已包含位置，不得再次询问坐标或图层\n\n"
+            "7. 单张自由创作或单图编辑 → generate_layer，并使用商品原图作为 reference_images\n"
+            "8. Action 返回图片后，结合目标和当前结果决定继续、审查或 finish\n"
+            "9. 如果用户信息不足 → chat 询问；用户闲聊 → chat 回复\n"
+            "10. 不要连续执行无进展的相同动作，检查重试次数避免死循环\n"
+            "11. 用户上传的商品图是商品身份唯一真源，不得替换或虚构商品特征\n"
+            "12. 对 prompt 或平台规则不确定时，可先 search_knowledge\n"
+            "13. 收到 Action 执行反馈时，必须修正 params 后重新调用；未生成目标图片前禁止 finish\n\n"
+            "14. 界面输入事实中的附件数量是后端已接收的权威事实；数量大于0时禁止回复‘未收到图片’或要求重新上传\n"
+            "15. region_edit_requested=true 且用户提出修改要求时，选择 generate_layer；框选图已包含位置，不得再次询问坐标或图层\n\n"
             "## 输出格式\n"
             "返回严格的JSON对象（不要markdown包裹）：\n"
             '{"plan":{"goal":"目标","steps":["步骤"],"completion_criteria":["标准"]},'

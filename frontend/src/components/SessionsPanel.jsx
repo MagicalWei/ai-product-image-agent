@@ -1,30 +1,44 @@
 // src/components/SessionsPanel.jsx
-import React, { useState, useEffect, useCallback } from 'react';
-import { Search, MessageSquare, Image, Clock, Plus, Trash2, Pencil, Check, X, FileText } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
+import { Search, MessageSquare, Image, Film, Clock, Plus, Trash2, Pencil, Check, X, FileText } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useApp } from '../context/AppContext';
+import { motion, useReducedMotion } from 'motion/react';
 
 const STATE_LABELS = {
   COLLECTING_INFO: '信息收集',
   GENERATING_IMAGES: '生成中',
   DONE: '已完成',
+  VIDEO_EDITING: '剪辑中',
+  VIDEO_RENDERING: '生成中',
 };
 
 const STATE_COLORS = {
   COLLECTING_INFO: 'var(--primary)',
   GENERATING_IMAGES: '#f59e0b',
   DONE: '#10b981',
+  VIDEO_EDITING: 'var(--primary)',
+  VIDEO_RENDERING: '#f59e0b',
 };
 
 export default function SessionsPanel({ onOpenSession, onCreateAndOpen }) {
+  const shouldReduceMotion = useReducedMotion();
   const auth = useAuth();
   const app = useApp();
-  const token = auth?.token;
+  const isAuthenticated = Boolean(auth?.isAuthenticated);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [editingId, setEditingId] = useState(null);
   const [editingTitle, setEditingTitle] = useState('');
   const [loading, setLoading] = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
+  const [confirmingSession, setConfirmingSession] = useState(null);
+  const [searchResults, setSearchResults] = useState(null);
+  const [searchResultQuery, setSearchResultQuery] = useState('');
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState({ query: '', message: '' });
+  const searchRequestRef = useRef(0);
 
   const sessions = app?.sessions || [];
   const fetchSessions = app?.fetchSessions;
@@ -32,14 +46,50 @@ export default function SessionsPanel({ onOpenSession, onCreateAndOpen }) {
   const renameSession = app?.renameSession;
 
   useEffect(() => {
-    if (token && fetchSessions) {
-      fetchSessions(token);
+    if (isAuthenticated && fetchSessions) {
+      fetchSessions();
     }
-  }, [token, fetchSessions]);
+  }, [isAuthenticated, fetchSessions]);
 
-  const filteredSessions = searchQuery.trim()
-    ? sessions.filter(s => (s.title || '').toLowerCase().includes(searchQuery.toLowerCase()))
+  useEffect(() => {
+    const query = searchQuery.trim();
+    if (!query) {
+      searchRequestRef.current += 1;
+      return undefined;
+    }
+
+    const requestId = ++searchRequestRef.current;
+    const timer = window.setTimeout(async () => {
+      setSearchLoading(true);
+      try {
+        const response = await fetch(`/api/agent/sessions?q=${encodeURIComponent(query)}`, {
+          credentials: 'include',
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.success) throw new Error(data.error || '搜索失败');
+        if (searchRequestRef.current === requestId) {
+          setSearchResults(data.sessions || []);
+          setSearchResultQuery(query);
+          setSearchError({ query: '', message: '' });
+        }
+      } catch (error) {
+        if (searchRequestRef.current === requestId) {
+          setSearchError({ query, message: error.message || '搜索失败，请重试' });
+          setSearchResultQuery(query);
+        }
+      } finally {
+        if (searchRequestRef.current === requestId) setSearchLoading(false);
+      }
+    }, 260);
+    return () => window.clearTimeout(timer);
+  }, [searchQuery]);
+
+  const activeQuery = searchQuery.trim();
+  const filteredSessions = activeQuery
+    ? (searchResultQuery === activeQuery ? (searchResults || []) : [])
     : sessions;
+  const activeSearchError = searchError.query === activeQuery ? searchError.message : '';
+  const isSearchPending = Boolean(activeQuery) && (searchLoading || searchResultQuery !== activeQuery);
 
   const handleOpen = useCallback((sessionId) => {
     if (onOpenSession) {
@@ -47,12 +97,29 @@ export default function SessionsPanel({ onOpenSession, onCreateAndOpen }) {
     }
   }, [onOpenSession]);
 
-  const handleDelete = useCallback(async (e, sessionId) => {
+  const requestDelete = useCallback((e, session) => {
+    e.preventDefault();
     e.stopPropagation();
-    if (!token) return;
-    await deleteSession(sessionId, token);
-    if (fetchSessions) fetchSessions(token);
-  }, [token, deleteSession, fetchSessions]);
+    if (!isAuthenticated || deletingId) return;
+    setConfirmingSession(session);
+  }, [isAuthenticated, deletingId]);
+
+  const handleDelete = useCallback(async () => {
+    const sessionId = confirmingSession?.session_id;
+    if (!sessionId || !isAuthenticated || !deleteSession || deletingId) return;
+    setDeletingId(sessionId);
+    try {
+      const deleted = await deleteSession(sessionId);
+      if (deleted) {
+        setSearchResults(current => Array.isArray(current)
+          ? current.filter(session => session.session_id !== sessionId)
+          : current);
+        setConfirmingSession(null);
+      }
+    } finally {
+      setDeletingId(null);
+    }
+  }, [confirmingSession, isAuthenticated, deleteSession, deletingId]);
 
   const handleRenameStart = useCallback((e, session) => {
     e.stopPropagation();
@@ -62,14 +129,14 @@ export default function SessionsPanel({ onOpenSession, onCreateAndOpen }) {
 
   const handleRenameSave = useCallback(async (e, sessionId) => {
     e.stopPropagation();
-    if (!token || !editingTitle.trim()) {
+    if (!isAuthenticated || !editingTitle.trim()) {
       setEditingId(null);
       return;
     }
-    await renameSession(sessionId, editingTitle.trim(), token);
-    if (fetchSessions) fetchSessions(token);
+    await renameSession(sessionId, editingTitle.trim());
+    if (fetchSessions) fetchSessions();
     setEditingId(null);
-  }, [token, editingTitle, renameSession, fetchSessions]);
+  }, [isAuthenticated, editingTitle, renameSession, fetchSessions]);
 
   const handleRenameCancel = useCallback((e) => {
     e.stopPropagation();
@@ -77,7 +144,7 @@ export default function SessionsPanel({ onOpenSession, onCreateAndOpen }) {
   }, []);
 
   const handleCreate = useCallback(async () => {
-    if (!token) return;
+    if (!isAuthenticated) return;
     setLoading(true);
     try {
       if (onCreateAndOpen) {
@@ -86,7 +153,7 @@ export default function SessionsPanel({ onOpenSession, onCreateAndOpen }) {
     } finally {
       setLoading(false);
     }
-  }, [token, onCreateAndOpen]);
+  }, [isAuthenticated, onCreateAndOpen]);
 
   const formatDate = (dateStr) => {
     if (!dateStr) return '';
@@ -100,7 +167,7 @@ export default function SessionsPanel({ onOpenSession, onCreateAndOpen }) {
   };
 
   return (
-    <div className="sessions-panel-container animate-fade-scale" style={{
+    <motion.div className="sessions-panel-container" initial={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: shouldReduceMotion ? 0.1 : 0.2, ease: [0.22, 1, 0.36, 1] }} style={{
       display: 'flex',
       flexDirection: 'column',
       gap: '20px',
@@ -116,7 +183,7 @@ export default function SessionsPanel({ onOpenSession, onCreateAndOpen }) {
         alignItems: 'center',
         gap: '16px'
       }}>
-        <div style={{ position: 'relative', flex: 1, maxWidth: '400px' }}>
+        <div style={{ position: 'relative', flex: 1, maxWidth: '460px' }}>
           <Search size={14} style={{
             position: 'absolute',
             left: '12px',
@@ -127,11 +194,22 @@ export default function SessionsPanel({ onOpenSession, onCreateAndOpen }) {
           <input
             type="text"
             className="form-input"
-            placeholder="搜索设计会话..."
-            style={{ fontSize: '0.8rem', padding: '8px 12px 8px 34px', width: '100%' }}
+            placeholder="搜索会话、商品名称或对话内容..."
+            aria-label="搜索最近打开的会话"
+            style={{ fontSize: '0.8rem', padding: '8px 36px 8px 34px', width: '100%' }}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
           />
+          {searchQuery && (
+            <button
+              type="button"
+              aria-label="清空搜索"
+              onClick={() => setSearchQuery('')}
+              style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', border: 0, background: 'transparent', color: 'var(--outline)', cursor: 'pointer', display: 'grid', placeItems: 'center', padding: 4 }}
+            >
+              <X size={14} />
+            </button>
+          )}
         </div>
 
         <button
@@ -155,7 +233,15 @@ export default function SessionsPanel({ onOpenSession, onCreateAndOpen }) {
 
       {/* Session list */}
       <div style={{ flex: 1 }}>
-        {filteredSessions.length === 0 ? (
+        {activeSearchError ? (
+          <div className="glass-panel" role="alert" style={{ padding: '18px 20px', color: 'var(--error)', fontSize: '0.8rem' }}>
+            {activeSearchError}，请检查网络后重新输入。
+          </div>
+        ) : isSearchPending ? (
+          <div className="glass-panel" style={{ padding: '18px 20px', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+            正在搜索会话、商品名称和对话内容…
+          </div>
+        ) : filteredSessions.length === 0 ? (
           <div className="glass-panel" style={{
             display: 'flex',
             flexDirection: 'column',
@@ -169,13 +255,13 @@ export default function SessionsPanel({ onOpenSession, onCreateAndOpen }) {
             <FileText size={40} style={{ opacity: 0.3 }} />
             <div style={{ textAlign: 'center' }}>
               <p style={{ margin: 0, fontWeight: 600, color: 'var(--on-surface)', fontSize: '0.95rem' }}>
-                暂无设计会话
+                {searchQuery.trim() ? '没有找到相关会话' : '暂无设计会话'}
               </p>
               <p style={{ margin: '4px 0 0', fontSize: '0.8rem' }}>
-                点击下方按钮开始创建
+                {searchQuery.trim() ? `没有与“${searchQuery.trim()}”匹配的商品或对话` : '点击下方按钮开始创建'}
               </p>
             </div>
-            <button
+            {!searchQuery.trim() && <button
               className="settings-btn save"
               onClick={handleCreate}
               disabled={loading}
@@ -190,7 +276,7 @@ export default function SessionsPanel({ onOpenSession, onCreateAndOpen }) {
             >
               <Plus size={16} />
               <span>新建会话</span>
-            </button>
+            </button>}
           </div>
         ) : (
           <div style={{
@@ -290,14 +376,18 @@ export default function SessionsPanel({ onOpenSession, onCreateAndOpen }) {
                         <Pencil size={12} />
                       </button>
                       <button
-                        onClick={(e) => handleDelete(e, session.session_id)}
+                        type="button"
+                        onClick={(e) => requestDelete(e, session)}
                         title="删除"
+                        aria-label={`删除会话：${session.title || '未命名会话'}`}
+                        disabled={deletingId === session.session_id}
                         style={{
                           border: 'none',
                           background: 'rgba(0,0,0,0.04)',
                           borderRadius: '6px',
                           padding: '4px 6px',
-                          cursor: 'pointer',
+                          cursor: deletingId === session.session_id ? 'wait' : 'pointer',
+                          opacity: deletingId === session.session_id ? 0.55 : 1,
                           color: 'var(--error)',
                           display: 'flex',
                           alignItems: 'center'
@@ -308,6 +398,12 @@ export default function SessionsPanel({ onOpenSession, onCreateAndOpen }) {
                     </div>
                   )}
                 </div>
+
+                {session.product_name && session.product_name !== session.title && (
+                  <div style={{ color: 'var(--on-surface-variant)', fontSize: '0.74rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    商品：{session.product_name}
+                  </div>
+                )}
 
                 {/* Status badge */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -321,6 +417,7 @@ export default function SessionsPanel({ onOpenSession, onCreateAndOpen }) {
                   }}>
                     {STATE_LABELS[session.current_state] || session.current_state || '未知'}
                   </span>
+                  {session.workspace_type !== 'image_design' && <span style={{ fontSize: '0.68rem', color: 'var(--on-surface-variant)' }}>{session.workspace_type === 'viral_replication' ? '爆款结构复刻' : '智能剪辑'}</span>}
                 </div>
 
                 {/* Stats row */}
@@ -336,10 +433,7 @@ export default function SessionsPanel({ onOpenSession, onCreateAndOpen }) {
                     <MessageSquare size={12} />
                     {session.message_count ?? 0} 条消息
                   </span>
-                  <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                    <Image size={12} />
-                    {session.image_count ?? 0} 张图
-                  </span>
+                  {session.workspace_type === 'video_edit' || session.workspace_type === 'viral_replication' ? <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}><Film size={12} />{session.video_count ?? 0} 个视频</span> : <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}><Image size={12} />{session.image_count ?? 0} 张图</span>}
                   <span style={{ display: 'flex', alignItems: 'center', gap: '4px', marginLeft: 'auto' }}>
                     <Clock size={12} />
                     {formatDate(session.updated_at)}
@@ -350,6 +444,47 @@ export default function SessionsPanel({ onOpenSession, onCreateAndOpen }) {
           </div>
         )}
       </div>
-    </div>
+      {confirmingSession && createPortal(
+        <div
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !deletingId) setConfirmingSession(null);
+          }}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 10000,
+            display: 'grid', placeItems: 'center', padding: 20,
+            background: 'rgba(18, 20, 24, 0.42)', backdropFilter: 'blur(6px)',
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-session-title"
+            aria-describedby="delete-session-description"
+            style={{
+              width: 'min(420px, 100%)', padding: 24,
+              borderRadius: 16, border: '1px solid var(--outline-variant)',
+              background: 'var(--surface-container-lowest)',
+              boxShadow: '0 24px 70px rgba(0,0,0,.22)',
+            }}
+          >
+            <div style={{ width: 38, height: 38, borderRadius: 10, display: 'grid', placeItems: 'center', color: 'var(--error)', background: 'rgba(239,68,68,.1)' }}>
+              <Trash2 size={19} />
+            </div>
+            <h2 id="delete-session-title" style={{ margin: '16px 0 7px', fontSize: 17 }}>确认删除这个会话？</h2>
+            <p id="delete-session-description" style={{ margin: 0, color: 'var(--on-surface-variant)', fontSize: 13, lineHeight: 1.65 }}>
+              将删除“{confirmingSession.title || '未命名会话'}”及其对话记录。此操作执行后不能在应用内撤销。
+            </p>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 9, marginTop: 22 }}>
+              <button type="button" className="settings-btn cancel" disabled={Boolean(deletingId)} onClick={() => setConfirmingSession(null)}>取消</button>
+              <button type="button" className="settings-btn save" disabled={Boolean(deletingId)} onClick={handleDelete} style={{ background: 'var(--error)', borderColor: 'var(--error)', color: '#fff' }}>
+                {deletingId ? '正在删除…' : '确认删除'}
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </motion.div>
   );
 }

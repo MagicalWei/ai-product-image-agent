@@ -2,7 +2,7 @@
 import { useState } from 'react';
 import { 
   Home, Grid, Archive, Clock, Folder, 
-  Pencil, MoreHorizontal, ChevronLeft, ChevronRight, HelpCircle
+  Pencil, MoreHorizontal, ChevronLeft, ChevronRight, HelpCircle, Video
 } from 'lucide-react';
 
 export default function Sidebar({ 
@@ -18,6 +18,7 @@ export default function Sidebar({
   const mainNavItems = [
     { id: 'portal', icon: Home, label: '首页' },
     { id: 'tools', icon: Grid, label: '工具' },
+    { id: 'video-workbench', icon: Video, label: '智能剪辑' },
     { id: 'folders', icon: Archive, label: '仓库' },
   ];
 

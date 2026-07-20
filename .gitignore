@@ -48,3 +48,9 @@ npm-cache
 # Test artifacts
 test-results/
 playwright-report/
+
+# Agent session data (auto-generated, not committed)
+agent/assets/data/canvas/*
+agent/assets/data/versions/*
+!agent/assets/data/canvas/.gitkeep
+!agent/assets/data/versions/.gitkeep

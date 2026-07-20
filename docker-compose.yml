@@ -11,7 +11,8 @@ services:
     volumes:
       - frontend_dist:/usr/share/nginx/html:ro
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     restart: unless-stopped
 
   # ─────────────────────────────────────────────────────────────────
@@ -29,6 +30,14 @@ services:
     depends_on:
       agent:
         condition: service_healthy
+    volumes:
+      - backend_uploads:/frontend/public/uploads
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     restart: unless-stopped
 
   # ─────────────────────────────────────────────────────────────────
@@ -63,3 +72,4 @@ services:
 
 volumes:
   frontend_dist:
+  backend_uploads:

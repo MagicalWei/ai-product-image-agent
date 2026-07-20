@@ -7,6 +7,7 @@ import { composeImageWithRegions, createImageEditRegion } from '../lib/regionEdi
 import { getCanvasMaterialImages } from '../lib/canvasImages';
 import { stripAttachmentRoutingFromDisplay } from '../lib/imageAgentRouting';
 import { createExportDownload, inlineSvgImageSources, retainSvgCluster } from '../lib/svgExport';
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 
 const AGENT_CONFIGS = {
   orchestrator: { name: '编排助手', color: 'var(--primary)' },
@@ -62,6 +63,7 @@ const ChatAttachmentPreview = ({ image, resolveUrl }) => {
 };
 
 const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelity, isGenerating, setIsGenerating, onImportImageAsset, autoCutout = true, setAutoCutout, processCutout, chatMessages = [], isTyping = false, typingStatus = 'Agent 正在处理…', onRecommendationAction, evalModel = 'eval_standard', onSendMessage, chatInputValue, onInputValueChange, currentSessionId, saveCanvasState, initialCanvasState, onAttachImageToChat, attachedImages = [], onRemoveAttachedImage, onAddStyleReference, onImageAdded, onConfirmProductAnalysis, onRetryProductAnalysis, isConfirmingProductAnalysis = false }, ref) => {
+  const shouldReduceMotion = useReducedMotion();
   const [camera, setCamera] = useState(() => {
     if (initialCanvasState?._session_id === currentSessionId && initialCanvasState.camera) {
       return initialCanvasState.camera;
@@ -2884,24 +2886,32 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
         )}
 
         <div className="chat-sidebar-history">
+          <AnimatePresence initial={false} mode="popLayout">
           {chatMessages.map((msg, index) => {
             const isAi = msg.sender === 'ai';
             const agentKey = msg.agent || 'coordinator';
             const agentInfo = AGENT_CONFIGS[agentKey] || AGENT_CONFIGS.coordinator;
+            const messageMotion = {
+              layout: 'position',
+              initial: shouldReduceMotion ? { opacity: 0 } : { opacity: 0, y: 8 },
+              animate: { opacity: 1, y: 0 },
+              exit: shouldReduceMotion ? { opacity: 0 } : { opacity: 0, y: -4 },
+              transition: { duration: shouldReduceMotion ? 0.1 : 0.2, ease: [0.22, 1, 0.36, 1] },
+            };
 
             // Product analysis card
             if (msg.type === 'product_analysis_loading') {
               return (
-                <div key={msg.id || index} className="sidebar-msg sidebar-msg--ai">
+                <motion.div key={msg.id || index} className="sidebar-msg sidebar-msg--ai" {...messageMotion}>
                   <span className="sidebar-msg__agent" style={{ color: 'var(--primary)' }}>图片分析</span>
                   <div className="sidebar-msg__bubble">{msg.text}</div>
-                </div>
+                </motion.div>
               );
             }
 
             if (msg.type === 'product_analysis' && msg.data) {
               return (
-                <div key={msg.id || index} className="sidebar-msg sidebar-msg--ai">
+                <motion.div key={msg.id || index} className="sidebar-msg sidebar-msg--ai" {...messageMotion}>
                   <span className="sidebar-msg__agent" style={{ color: 'var(--primary)' }}>
                     图片分析
                   </span>
@@ -2915,12 +2925,12 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
                       onRetry={() => onRetryProductAnalysis?.(msg.id)}
                     />
                   </div>
-                </div>
+                </motion.div>
               );
             }
 
             return (
-              <div key={msg.id || index} className={`sidebar-msg ${isAi ? 'sidebar-msg--ai' : 'sidebar-msg--user'}`}>
+              <motion.div key={msg.id || index} className={`sidebar-msg ${isAi ? 'sidebar-msg--ai' : 'sidebar-msg--user'}`} {...messageMotion}>
                 {isAi && (
                   <span className="sidebar-msg__agent" style={{ color: agentInfo.color }}>
                     {agentInfo.name}
@@ -2954,19 +2964,39 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
                     </div>
                   )}
                 </div>
-              </div>
+              </motion.div>
             );
           })}
           {isTyping && (
-            <div className="sidebar-msg sidebar-msg--ai">
-              <div className="sidebar-msg__bubble sidebar-msg__typing">
-                <span style={{ marginRight: 8 }}>{typingStatus}</span>
-                <span className="typing-dot" />
-                <span className="typing-dot" />
-                <span className="typing-dot" />
+            <motion.div
+              key="agent-typing-status"
+              layout="position"
+              className="sidebar-msg sidebar-msg--ai"
+              initial={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+            >
+              <div className="sidebar-msg__bubble sidebar-msg__typing agent-status-bubble">
+                <motion.span
+                  className="agent-status-pulse"
+                  animate={shouldReduceMotion ? { opacity: 0.7 } : { opacity: [0.4, 1, 0.4] }}
+                  transition={shouldReduceMotion ? { duration: 0 } : { duration: 1.4, repeat: Infinity, ease: 'easeInOut' }}
+                />
+                <AnimatePresence mode="wait" initial={false}>
+                  <motion.span
+                    key={typingStatus}
+                    initial={{ opacity: 0, y: shouldReduceMotion ? 0 : 3 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: shouldReduceMotion ? 0 : -3 }}
+                    transition={{ duration: 0.14 }}
+                  >
+                    {typingStatus}
+                  </motion.span>
+                </AnimatePresence>
               </div>
-            </div>
+            </motion.div>
           )}
+          </AnimatePresence>
         </div>
 
         {onSendMessage && (
@@ -3037,10 +3067,20 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
                 <RotateCcw size={11} /> 重新生成
               </button>
             </div>
+            <AnimatePresence initial={false}>
             {attachedImages && attachedImages.length > 0 && (
-              <div className="chat-attachments-bar">
+              <motion.div className="chat-attachments-bar" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+                <AnimatePresence initial={false} mode="popLayout">
                 {attachedImages.map(img => (
-                  <div key={img.id} className="attachment-chip">
+                  <motion.div
+                    layout
+                    key={img.id}
+                    className="attachment-chip"
+                    initial={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.97, y: 4 }}
+                    animate={{ opacity: 1, scale: 1, y: 0 }}
+                    exit={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.97, y: -3 }}
+                    transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+                  >
                     <img src={getImageUrl(img.url)} alt={img.name || '附件'} />
                     <span className="attachment-chip-name">
                       {img.kind === 'region_edit' ? '框选图 · ' : img.role === 'style_reference' ? '风格参考 · ' : ''}
@@ -3052,10 +3092,12 @@ const InfiniteCanvas = React.forwardRef(({ theme = 'light', currentUser, fidelit
                       onClick={() => onRemoveAttachedImage?.(img.id)}
                       title="移除附件"
                     ><X size={10} /></button>
-                  </div>
+                  </motion.div>
                 ))}
-              </div>
+                </AnimatePresence>
+              </motion.div>
             )}
+            </AnimatePresence>
             <div className="chat-sidebar-input-inner">
             <textarea
               value={chatInputValue || ''}

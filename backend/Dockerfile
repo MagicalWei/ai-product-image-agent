@@ -3,6 +3,8 @@
 # ───────────────────────────────────────────────────────────────────
 FROM node:22-alpine AS node-backend
 
+RUN apk add --no-cache ffmpeg font-noto-cjk
+
 WORKDIR /app
 
 # pnpm

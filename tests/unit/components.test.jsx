@@ -119,21 +119,12 @@ describe('ProductAnalysisCard MVP', () => {
 });
 
 describe('Portal product upload', () => {
-  it('starts product analysis before cloud synchronization finishes', async () => {
-    let finishUpload;
-    const onImageUploaded = vi.fn(() => new Promise((resolve) => {
-      finishUpload = resolve;
-    }));
-    const onProductImageSelected = vi.fn();
-    const onStartOnboarding = vi.fn();
+  it('keeps the selected product image attached and sends it with the instruction', async () => {
+    const onDirectAgentStart = vi.fn().mockResolvedValue(undefined);
     const { container } = render(
       <Portal
-        onStartOnboarding={onStartOnboarding}
         onQuickToolClick={vi.fn()}
-        onDirectAgentStart={vi.fn()}
-        onImageUploaded={onImageUploaded}
-        onProductImageSelected={onProductImageSelected}
-        onOpenPricing={vi.fn()}
+        onDirectAgentStart={onDirectAgentStart}
       />
     );
 
@@ -141,10 +132,16 @@ describe('Portal product upload', () => {
     const file = new File(['product'], 'product.png', { type: 'image/png' });
     fireEvent.change(input, { target: { files: [file] } });
 
-    await waitFor(() => expect(onProductImageSelected).toHaveBeenCalledTimes(1));
-    expect(onStartOnboarding).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByText('product.png')).toBeDefined());
+    expect(onDirectAgentStart).not.toHaveBeenCalled();
 
-    finishUpload({ id: 'asset-1', url: '/uploads/product.png' });
-    await waitFor(() => expect(onStartOnboarding).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByRole('textbox', { name: '描述商品设计需求' }), {
+      target: { value: '分析商品并生成一张主图' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '发送需求' }));
+
+    await waitFor(() => expect(onDirectAgentStart).toHaveBeenCalledTimes(1));
+    expect(onDirectAgentStart.mock.calls[0][0]).toBe('分析商品并生成一张主图');
+    expect(onDirectAgentStart.mock.calls[0][2].productImages[0].name).toBe('product.png');
   });
 });

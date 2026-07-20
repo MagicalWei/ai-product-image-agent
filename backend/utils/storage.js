@@ -23,6 +23,10 @@ export class StorageProvider {
     throw new Error('saveFile() must be implemented by subclass');
   }
 
+  async saveFileFromPath(filepath, filename) {
+    return this.saveFile(await fs.promises.readFile(filepath), filename);
+  }
+
   /**
    * Delete a file from storage.
    * @param {string} filepath Path or key of the file to remove
@@ -88,6 +92,12 @@ export class LocalStorage extends StorageProvider {
   async saveFile(buffer, filename) {
     const physicalPath = path.join(this.uploadsDir, filename);
     await fs.promises.writeFile(physicalPath, buffer);
+    return `/uploads/${filename}`;
+  }
+
+  async saveFileFromPath(filepath, filename) {
+    const physicalPath = path.join(this.uploadsDir, filename);
+    await fs.promises.copyFile(filepath, physicalPath);
     return `/uploads/${filename}`;
   }
 
@@ -159,6 +169,17 @@ export class S3Storage extends StorageProvider {
     return this.getFileUrl(key);
   }
 
+  async saveFileFromPath(filepath, filename) {
+    const command = new PutObjectCommand({
+      Bucket: this.bucket,
+      Key: filename,
+      Body: fs.createReadStream(filepath),
+      ContentType: this.getContentType(filename),
+    });
+    await this.client.send(command);
+    return this.getFileUrl(filename);
+  }
+
   getContentType(filename) {
     const ext = path.extname(filename).toLowerCase();
     if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
@@ -166,6 +187,10 @@ export class S3Storage extends StorageProvider {
     if (ext === '.gif') return 'image/gif';
     if (ext === '.webp') return 'image/webp';
     if (ext === '.svg') return 'image/svg+xml';
+    if (ext === '.mp4') return 'video/mp4';
+    if (ext === '.webm') return 'video/webm';
+    if (ext === '.mp3') return 'audio/mpeg';
+    if (ext === '.m4a') return 'audio/mp4';
     return 'application/octet-stream';
   }
 

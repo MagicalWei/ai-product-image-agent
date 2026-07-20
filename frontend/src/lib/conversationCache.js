@@ -103,6 +103,15 @@ export function saveConversationCache(sessionId, messages) {
   }
 }
 
+export function removeConversationCache(sessionId) {
+  if (!sessionId) return;
+  try {
+    localStorage.removeItem(cacheKey(sessionId));
+  } catch (error) {
+    console.warn('Failed to remove conversation cache:', error);
+  }
+}
+
 /** Merge without removing either local in-flight turns or durable server turns. */
 export function mergeConversationMessages(serverMessages = [], localMessages = []) {
   const server = Array.isArray(serverMessages) ? serverMessages : [];

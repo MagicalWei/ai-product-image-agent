@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { Mail, Lock, ShieldCheck, UserPlus, LogIn, ArrowRight, CheckCircle, AlertCircle, KeyRound } from 'lucide-react';
 import CloseButton from './CloseButton';
 import { useAuth } from '../context/AuthContext';
+import { AnimatePresence, motion } from 'motion/react';
 
 export default function AuthModal({ onClose, onLoginSuccess, initialTab = 'login' }) {
   const { login, register, forgotPassword, resetPassword, sendVerificationCode } = useAuth();
@@ -19,6 +20,8 @@ export default function AuthModal({ onClose, onLoginSuccess, initialTab = 'login
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isVisible, setIsVisible] = useState(true);
+  const requestClose = () => setIsVisible(false);
 
   // Handle countdown timer
   useEffect(() => {
@@ -93,7 +96,7 @@ export default function AuthModal({ onClose, onLoginSuccess, initialTab = 'login
     try {
       await register(email, password, name || email.split('@')[0], code);
       setSuccessMsg('注册成功！正在自动登录...');
-      setTimeout(() => { onLoginSuccess?.(); onClose(); }, 1500);
+      setTimeout(() => { onLoginSuccess?.(); requestClose(); }, 1500);
     } catch (err) {
       setErrorMsg(err.message);
     } finally {
@@ -112,7 +115,7 @@ export default function AuthModal({ onClose, onLoginSuccess, initialTab = 'login
     try {
       await login(email, password);
       setSuccessMsg('登录成功！');
-      setTimeout(() => { onLoginSuccess?.(); onClose(); }, 1500);
+      setTimeout(() => { onLoginSuccess?.(); requestClose(); }, 1500);
     } catch (err) {
       setErrorMsg(err.message);
     } finally {
@@ -150,9 +153,10 @@ export default function AuthModal({ onClose, onLoginSuccess, initialTab = 'login
   const isForgot = activeTab === 'forgot';
 
   return (
-    <div className="onboarding-modal-overlay" onClick={onClose}>
-      <div className="onboarding-modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '420px', padding: '28px' }}>
-        <CloseButton onClick={onClose} />
+    <AnimatePresence onExitComplete={onClose}>
+    {isVisible && <motion.div className="onboarding-modal-overlay" onClick={requestClose} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.16 }}>
+      <motion.div className="onboarding-modal-content" onClick={(e) => e.stopPropagation()} initial={{ opacity: 0, y: 8, scale: 0.985 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 5, scale: 0.99 }} transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }} style={{ maxWidth: '420px', padding: '28px' }}>
+        <CloseButton onClick={requestClose} />
 
         <div style={{ textAlign: 'center', marginBottom: '8px' }}>
           <h2 className="headline-lg" style={{ fontSize: '1.4rem', fontWeight: 700, fontFamily: 'var(--font-display)' }}>
@@ -407,7 +411,8 @@ export default function AuthModal({ onClose, onLoginSuccess, initialTab = 'login
             )}
           </div>
         </form>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>}
+    </AnimatePresence>
   );
 }

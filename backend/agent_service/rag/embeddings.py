@@ -33,6 +33,7 @@ class EmbeddingService:
         api_key: str,
         base_url: Optional[str] = None,
         model: str = DEFAULT_EMBEDDING_MODEL,
+        dimension: int = DEFAULT_EMBEDDING_DIM,
     ):
         if not api_key:
             raise ValueError("Embedding API key is required")
@@ -40,7 +41,7 @@ class EmbeddingService:
         self.api_key = api_key
         self.base_url = base_url or "https://api.openai.com/v1"
         self.model = model
-        self.dim = DEFAULT_EMBEDDING_DIM
+        self.dim = dimension
 
         self.client = AsyncOpenAI(
             api_key=api_key,
@@ -64,7 +65,9 @@ class EmbeddingService:
             return []
 
         # OpenAI embedding API 单次调用限制约 2048 条，这里做简单分批
-        batch_size = 100
+        # Keep compatibility with providers such as DashScope whose
+        # OpenAI-compatible endpoint accepts at most 10 inputs per request.
+        batch_size = 10
         all_embeddings: List[List[float]] = []
 
         for i in range(0, len(texts), batch_size):
@@ -73,6 +76,7 @@ class EmbeddingService:
                 resp = await self.client.embeddings.create(
                     model=self.model,
                     input=batch,
+                    dimensions=self.dim,
                 )
                 # 按 index 排序确保顺序
                 batch_embeddings = sorted(resp.data, key=lambda x: x.index)

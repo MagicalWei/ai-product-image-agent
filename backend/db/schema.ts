@@ -7,6 +7,7 @@ import {
   boolean,
   timestamp,
   numeric,
+  real,
   jsonb,
   index,
   customType,
@@ -145,10 +146,68 @@ export const assets = pgTable(
     createdAt: timestamp('created_at').notNull().defaultNow(),
     source: varchar('source', { length: 32 }).notNull().default('user_uploaded'),
     sessionId: varchar('session_id', { length: 128 }),
+    mediaType: varchar('media_type', { length: 16 }).notNull().default('image'),
+    indexStatus: varchar('index_status', { length: 24 }).notNull().default('pending'),
+    indexedAt: timestamp('indexed_at'),
+    indexError: text('index_error').default(''),
   },
   (table) => [
     index('idx_assets_uid').on(table.uid),
     index('idx_assets_uid_date').on(table.uid, table.date.desc()),
+  ]
+);
+
+export const mediaEmbeddings = pgTable(
+  'media_embeddings',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    uid: varchar('uid', { length: 64 })
+      .notNull()
+      .references(() => users.uid, { onDelete: 'cascade' }),
+    assetId: varchar('asset_id', { length: 128 })
+      .notNull()
+      .references(() => assets.id, { onDelete: 'cascade' }),
+    sessionId: varchar('session_id', { length: 128 }),
+    segmentIndex: integer('segment_index').notNull().default(0),
+    mediaType: varchar('media_type', { length: 16 }).notNull(),
+    contentText: text('content_text').notNull().default(''),
+    styleText: text('style_text').notNull().default(''),
+    productText: text('product_text').notNull().default(''),
+    startTime: real('start_time'),
+    endTime: real('end_time'),
+    keyframeUrl: varchar('keyframe_url', { length: 512 }).default(''),
+    metadata: jsonb('metadata').notNull().default('{}'),
+    contentEmbedding: vector('content_embedding'),
+    styleEmbedding: vector('style_embedding'),
+    productEmbedding: vector('product_embedding'),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => [
+    index('idx_media_embeddings_uid_type').on(table.uid, table.mediaType),
+    index('idx_media_embeddings_asset').on(table.assetId),
+  ]
+);
+
+export const videoJobs = pgTable(
+  'video_jobs',
+  {
+    id: varchar('id', { length: 128 }).primaryKey().notNull(),
+    uid: varchar('uid', { length: 64 })
+      .notNull()
+      .references(() => users.uid, { onDelete: 'cascade' }),
+    sessionId: varchar('session_id', { length: 128 }),
+    status: varchar('status', { length: 32 }).notNull().default('queued'),
+    progress: integer('progress').notNull().default(0),
+    plan: jsonb('plan').notNull().default('{}'),
+    outputUrl: varchar('output_url', { length: 512 }).default(''),
+    error: text('error').default(''),
+    createdAt: timestamp('created_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  },
+  (table) => [
+    index('idx_video_jobs_uid_created').on(table.uid, table.createdAt.desc()),
+    index('idx_video_jobs_status').on(table.status),
   ]
 );
 
@@ -207,5 +266,6 @@ export type EmailVerificationCode = typeof emailVerificationCodes.$inferSelect;
 export type DoubaoAgentSession = typeof doubaoAgentSessions.$inferSelect;
 export type BrandMemory = typeof brandMemories.$inferSelect;
 export type Asset = typeof assets.$inferSelect;
+export type MediaEmbedding = typeof mediaEmbeddings.$inferSelect;
 export type Order = typeof orders.$inferSelect;
 export type RagDocument = typeof ragDocuments.$inferSelect;

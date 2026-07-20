@@ -122,6 +122,12 @@ afterAll(async () => {
 });
 
 describe.sequential('registered user API journey', () => {
+  it('reports backend liveness without requiring authentication', async () => {
+    const response = await fetch(`${BASE_URL}/api/health`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ status: 'ok', service: 'backend' });
+  });
+
   it('rejects protected endpoints before login', async () => {
     const response = await fetch(`${BASE_URL}/api/custom-auth/me`);
     expect(response.status).toBe(401);
@@ -297,7 +303,7 @@ describe.sequential('registered user API journey', () => {
     const restored = await request(`/api/agent/sessions/${designSessionId}`);
     expect(restored.status).toBe(200);
     const session = (await restored.json()).session;
-    expect(session.chat_history.slice(-2)).toEqual([
+    expect(session.chat_history.slice(-2)).toMatchObject([
       { role: 'user', content: '自然场景，卖点图' },
       { role: 'assistant', content: '已根据商品图开始生成自然场景卖点图。' },
     ]);
@@ -323,7 +329,7 @@ describe.sequential('registered user API journey', () => {
     const restored = await request(`/api/agent/sessions/${designSessionId}`);
     const history = (await restored.json()).session.chat_history;
     expect(history).toContainEqual({ role: 'user', content: '自然场景，卖点图' });
-    expect(history.slice(-2)).toEqual([
+    expect(history.slice(-2)).toMatchObject([
       { role: 'user', content: '开始新设计' },
       { role: 'assistant', content: '已开始新的设计，之前的对话仍然保留。' },
     ]);

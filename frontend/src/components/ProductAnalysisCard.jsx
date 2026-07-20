@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { AlertTriangle, CheckCircle2, Eye, LoaderCircle, RefreshCw, Sparkles } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Eye, LoaderCircle, RefreshCw } from 'lucide-react';
 
 const VERIFY_LABELS = {
   confirmed_visual: '图片可直接证明',
@@ -92,7 +92,7 @@ export default function ProductAnalysisCard({
   return (
     <div className="product-analysis-card" style={cardStyle}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-        {confirmed ? <CheckCircle2 size={17} color="#16a34a" /> : <Sparkles size={17} color="var(--primary)" />}
+        {confirmed && <CheckCircle2 size={17} color="#16a34a" />}
         <strong style={{ color: 'var(--text-primary)' }}>
           {confirmed ? '商品信息已确认' : '商品图识别草稿'}
         </strong>

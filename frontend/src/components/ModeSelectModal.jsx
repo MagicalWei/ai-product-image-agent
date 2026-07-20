@@ -1,13 +1,21 @@
 // src/components/ModeSelectModal.jsx
-import React from 'react';
-import { Layers, Cpu, MousePointerClick } from 'lucide-react';
+import { Layers, Cpu } from 'lucide-react';
 import CloseButton from './CloseButton';
+import { useState } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
 
 export default function ModeSelectModal({ onSelectMode, onClose }) {
+  const [isVisible, setIsVisible] = useState(true);
+  const requestClose = () => setIsVisible(false);
   return (
-    <div className="onboarding-modal-overlay animate-fade-in" style={{ zIndex: 1000 }}>
-      <div 
-        className="onboarding-modal-content glass-pane animate-fade-scale" 
+    <AnimatePresence onExitComplete={onClose}>
+    {isVisible && <motion.div className="onboarding-modal-overlay" style={{ zIndex: 1000 }} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.16 }}>
+      <motion.div
+        className="onboarding-modal-content glass-pane"
+        initial={{ opacity: 0, y: 8, scale: 0.985 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 5, scale: 0.99 }}
+        transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
         style={{ 
           maxWidth: '640px', 
           width: '90%', 
@@ -18,7 +26,7 @@ export default function ModeSelectModal({ onSelectMode, onClose }) {
           boxShadow: '0 24px 64px rgba(0, 0, 0, 0.6)'
         }}
       >
-        <CloseButton onClick={onClose} />
+        <CloseButton onClick={requestClose} />
 
         <div style={{ textAlign: 'center', marginBottom: '24px' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', marginBottom: '8px' }}>
@@ -169,7 +177,8 @@ export default function ModeSelectModal({ onSelectMode, onClose }) {
             </button>
           </div>
         </div>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>}
+    </AnimatePresence>
   );
 }

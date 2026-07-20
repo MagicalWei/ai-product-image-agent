@@ -58,6 +58,18 @@ class ImageQuality(BaseModel):
     issues: list[str] = Field(default_factory=list, max_length=6)
 
 
+class VisualStyle(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    style_summary: str = Field(default="", max_length=240)
+    background: str = Field(default="", max_length=160)
+    lighting: str = Field(default="", max_length=160)
+    composition: str = Field(default="", max_length=160)
+    color_palette: list[str] = Field(default_factory=list, max_length=8)
+    typography: str = Field(default="", max_length=160)
+    mood: str = Field(default="", max_length=160)
+
+
 class ProductImageAnalysis(BaseModel):
     """Validated draft. It is not Agent memory until explicitly confirmed."""
 
@@ -70,6 +82,7 @@ class ProductImageAnalysis(BaseModel):
     selling_points: list[SellingPoint] = Field(min_length=3, max_length=5)
     uncertain_claims: list[str] = Field(default_factory=list, max_length=8)
     image_quality: ImageQuality = Field(default_factory=ImageQuality)
+    visual_style: VisualStyle = Field(default_factory=VisualStyle)
 
 
 IMAGE_ANALYSIS_OUTPUT_SCHEMA = {
@@ -110,6 +123,15 @@ IMAGE_ANALYSIS_OUTPUT_SCHEMA = {
         "clarity": "good | fair | poor",
         "issues": ["影响识别的图片问题"],
     },
+    "visual_style": {
+        "style_summary": "可复用的整体视觉风格描述",
+        "background": "背景类型与质感",
+        "lighting": "光线方向、软硬与明暗关系",
+        "composition": "主体位置、景别、留白与视觉层级",
+        "color_palette": ["主要颜色"],
+        "typography": "可见文字的字体气质与排版；无文字则为空",
+        "mood": "整体氛围",
+    },
 }
 
 IMAGE_ANALYSIS_SYSTEM_PROMPT = """
@@ -123,7 +145,8 @@ IMAGE_ANALYSIS_SYSTEM_PROMPT = """
 3. 不识别或猜测不存在的品牌、型号、参数和功能。
 4. 即使图片信息不足，也返回 3 条谨慎候选卖点，可降低置信度并明确需要确认；不要向用户提问。
 5. visible_facts 只写直接观察结果。uncertain_claims 明确列出无法从图片判断的内容。
-6. 只输出 JSON，不要 markdown、解释或前后缀。
+6. visual_style 只描述可观察的背景、光线、构图、配色、字体和氛围，用于后续风格检索；不要把商品功能写入风格。
+7. 只输出 JSON，不要 markdown、解释或前后缀。
 """.strip()
 
 

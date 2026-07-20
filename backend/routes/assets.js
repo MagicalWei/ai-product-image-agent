@@ -8,6 +8,7 @@ import { authenticateSession } from '../auth/sessionMiddleware.js';
 import { asyncHandler, AppError } from '../middleware/errorHandler.js';
 import createStorageProvider from '../utils/storage.js';
 import { createResilientPool } from '../utils/transientErrors.js';
+import { indexMediaAsset, searchMediaAssets } from '../utils/mediaIndex.js';
 
 const storage = createStorageProvider(config.STORAGE_TYPE || 'local');
 
@@ -75,6 +76,18 @@ router.post(
       [assetId, uid]
     );
     if (existing.rowCount > 0) {
+      if (existing.rows[0].index_status !== 'indexed') {
+        indexMediaAsset({
+          uid,
+          asset_id: assetId,
+          session_id: existing.rows[0].session_id || '',
+          media_type: existing.rows[0].media_type || 'image',
+          image_base64: `data:${mimeType};base64,${base64Content}`,
+          file_name: existing.rows[0].name || name || 'image',
+        }).catch((error) => {
+          console.warn(`[MediaIndex] Retried asset ${assetId} was not indexed:`, error.message);
+        });
+      }
       return res.json({ success: true, asset: existing.rows[0], idempotent: true });
     }
 
@@ -130,6 +143,69 @@ router.post(
         metrics: metrics ? (typeof metrics === 'string' ? JSON.parse(metrics) : metrics) : null
       },
     });
+
+    const imageDataUrl = `data:${mimeType};base64,${base64Content}`;
+    indexMediaAsset({
+      uid,
+      asset_id: assetId,
+      session_id: sessionId || '',
+      media_type: 'image',
+      image_base64: imageDataUrl,
+      file_name: name || uniqueFileName,
+    }).catch((error) => {
+      console.warn(`[MediaIndex] Image asset ${assetId} was not indexed:`, error.message);
+    });
+  })
+);
+
+// ─── POST /search ───────────────────────────────────────────────────────────
+// Semantic search is always scoped to the authenticated account server-side.
+router.post(
+  '/search',
+  authenticateSession,
+  asyncHandler(async (req, res) => {
+    const query = String(req.body?.query || '').trim();
+    if (!query) throw new AppError('请输入素材检索内容', 400);
+    const vectorKind = ['content', 'style', 'product'].includes(req.body?.vector_kind)
+      ? req.body.vector_kind : 'content';
+    const mediaType = ['image', 'video'].includes(req.body?.media_type)
+      ? req.body.media_type : null;
+    try {
+      const result = await searchMediaAssets({
+        uid: req.user.uid,
+        query,
+        vector_kind: vectorKind,
+        media_type: mediaType,
+        top_k: Math.max(1, Math.min(Number(req.body?.top_k) || 6, 20)),
+        min_score: Math.max(-1, Math.min(Number(req.body?.min_score) || 0, 1)),
+      });
+      res.json(result);
+    } catch (error) {
+      throw new AppError('媒体语义检索暂时不可用，请稍后重试', 503);
+    }
+  })
+);
+
+router.post(
+  '/:id/reindex',
+  authenticateSession,
+  asyncHandler(async (req, res) => {
+    const asset = await pool.query('SELECT * FROM assets WHERE id = $1 AND uid = $2', [req.params.id, req.user.uid]);
+    if (asset.rowCount === 0) throw new AppError('找不到对应的素材记录', 404);
+    const row = asset.rows[0];
+    const analysis = req.body?.analysis && typeof req.body.analysis === 'object' ? req.body.analysis : {};
+    if (Object.keys(analysis).length === 0) {
+      throw new AppError('重新索引需要有效的素材分析结果', 400);
+    }
+    const result = await indexMediaAsset({
+      uid: req.user.uid,
+      asset_id: row.id,
+      session_id: row.session_id || '',
+      media_type: row.media_type || 'image',
+      analysis,
+      source_index: Number(req.body?.source_index) || 0,
+    });
+    res.json(result);
   })
 );
 

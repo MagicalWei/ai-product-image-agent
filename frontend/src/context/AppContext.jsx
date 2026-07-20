@@ -6,6 +6,7 @@ import { fetchJsonWithRetry } from '../lib/reliableFetch';
 import {
   loadConversationCache,
   mergeConversationMessages,
+  removeConversationCache,
   saveConversationCache,
   toDurableConversationHistory,
 } from '../lib/conversationCache';
@@ -24,8 +25,6 @@ export const AppProvider = ({ children }) => {
   const location = useLocation();
   const navigate = useNavigate();
   const auth = useAuth();
-  // token is always null in Better Auth (cookie-based), kept for backwards compat
-  const token = auth ? auth.token : null;
   const isAuthenticated = auth?.isAuthenticated || false;
   const isAuthLoading = auth?.isAuthLoading || false;
 
@@ -286,7 +285,7 @@ export const AppProvider = ({ children }) => {
     return null;
   }, [isAuthenticated, setChatMessages, setProductInfo, showError]);
 
-  const createSession = useCallback(async (title = '新设计会话', authToken) => {
+  const createSession = useCallback(async (title = '新设计会话', authToken, options = {}) => {
     // authToken parameter kept for backwards compatibility
     const clientSessionId = `session-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
     try {
@@ -295,7 +294,12 @@ export const AppProvider = ({ children }) => {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ title, client_session_id: clientSessionId }),
+        body: JSON.stringify({
+          title,
+          client_session_id: clientSessionId,
+          workspace_type: options.workspaceType || 'image_design',
+          last_params: options.lastParams || {},
+        }),
         credentials: 'include'
       }, { attempts: 4, timeoutMs: 30000 });
       if (response.ok && data.success && data.session) {
@@ -329,31 +333,37 @@ export const AppProvider = ({ children }) => {
     return null;
   }, [setChatMessages, showError]);
 
-  const deleteSession = useCallback(async (sessionId, authToken) => {
-    // authToken parameter kept for backwards compatibility
-    if (!sessionId) return;
+  const deleteSession = useCallback(async (sessionId) => {
+    if (!sessionId || !isAuthenticated) return false;
     try {
       const response = await fetch(`/api/agent/sessions/${sessionId}`, {
         method: 'DELETE',
         credentials: 'include'
       });
-      const data = await response.json();
-      if (response.ok && data.success) {
-        setSessions(prev => prev.filter(s => s.session_id !== sessionId));
-        if (currentSessionId === sessionId) {
-          const remaining = sessions.filter(s => s.session_id !== sessionId);
-          if (remaining.length > 0) {
-            selectSession(remaining[0].session_id);
-          } else {
-            createSession('新设计会话');
-          }
-        }
-        showSuccess('会话已成功删除');
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || `删除请求失败（${response.status}）`);
       }
+      const remaining = sessions.filter(s => s.session_id !== sessionId);
+      setSessions(remaining);
+      removeConversationCache(sessionId);
+      if (currentSessionId === sessionId) {
+        if (remaining.length > 0) {
+          await selectSession(remaining[0].session_id);
+        } else {
+          setCurrentSessionId('');
+          localStorage.removeItem('current_session_id');
+          setChatMessages([]);
+          setCurrentCanvasState(null);
+        }
+      }
+      showSuccess('会话已成功删除');
+      return true;
     } catch (e) {
       showError(`删除会话失败: ${e.message}`);
+      return false;
     }
-  }, [currentSessionId, sessions, selectSession, createSession, showError, showSuccess]);
+  }, [currentSessionId, isAuthenticated, sessions, selectSession, showError, showSuccess]);
 
   const renameSession = useCallback(async (sessionId, title, authToken) => {
     // authToken parameter kept for backwards compatibility
@@ -497,6 +507,7 @@ export const AppProvider = ({ children }) => {
     renameSession,
     saveCanvasState,
     currentCanvasState,
+    setCurrentCanvasState,
     // API Configuration
     evalModel,
     setEvalModel,

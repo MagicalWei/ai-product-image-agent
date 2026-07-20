@@ -1,6 +1,6 @@
 // src/components/DatabaseView.jsx
-import React, { useState, useEffect } from 'react';
-import { Cpu, Folder, Image, Sparkles, Upload } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Cpu, Folder, Image, Upload } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
 export default function DatabaseView() {
@@ -12,7 +12,7 @@ export default function DatabaseView() {
   try {
     const auth = useAuth();
     token = auth.token;
-  } catch (e) {
+  } catch {
     // Context might be missing
   }
 
@@ -82,7 +82,6 @@ export default function DatabaseView() {
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', padding: '16px', background: 'rgba(255,255,255,0.03)', borderRadius: '8px' }}>
           <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <Sparkles size={14} />
             AI 生成
           </span>
           <span style={{ fontSize: '1.6rem', fontWeight: 800, color: '#8b5cf6', fontFamily: 'monospace' }}>

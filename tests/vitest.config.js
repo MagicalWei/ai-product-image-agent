@@ -9,6 +9,7 @@ const __dirname = path.dirname(__filename);
 export default defineConfig({
   plugins: [react()],
   resolve: {
+    dedupe: ['react', 'react-dom'],
     alias: {
       'react/jsx-dev-runtime': path.resolve(__dirname, '../node_modules/react/jsx-dev-runtime'),
       'react/jsx-runtime': path.resolve(__dirname, '../node_modules/react/jsx-runtime'),
@@ -27,6 +28,9 @@ export default defineConfig({
           'react-dom',
           '@testing-library/react',
           'lucide-react',
+          'motion',
+          /framer-motion/,
+          /motion-(dom|utils)/,
         ],
       },
     },
