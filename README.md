@@ -1,4 +1,4 @@
-# AI Product Image Agent
+# AI Product Image&Video Agent
 
 AI 驱动的电商商品图智能生成、评估与编辑平台。用户通过自然语言对话即可生成专业级电商商品图，支持多类型图片、画布编辑、品牌记忆等完整工作流。
 
